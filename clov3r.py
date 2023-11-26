@@ -323,9 +323,9 @@ class IRCBot:
                         # Process the URL based on its file extension
                         if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
                             response = f"image file: {file_name}"
-                        elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv"]:
+                        elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
                             response = f"media file: {file_name}"
-                        elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c"]:
+                        elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt"]:
                             response = f"data file: {file_name}"
                         else:
                             # Sanitize the response before sending it to the channel
@@ -386,12 +386,39 @@ class IRCBot:
 
     def dice_roll(self, args, channel, sender):
         print("Dice roll requested...")
-        
-        # Default to d20 if no arguments are provided
-        die_type = "d20" if not args else args.lower()
+
+        # Default to 1d20 if no arguments are provided
+        if not args:
+            args = "1d20"
+
+        # Use regular expression to parse the input, allowing for custom dice expressions
+        match = re.match(r'(\d*)[dD](\d+)', args)
+        if not match:
+            response = f"{sender}, Invalid roll format: {args}.\r\n"
+            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            return
+
+        # Extract the number of dice and the type of each die
+        num_dice = int(match.group(1)) if match.group(1) else 1
+        die_type = f"d{match.group(2)}"
+
+        # Set a reasonable limit on the number of dice rolls (e.g., 1000)
+        max_allowed_rolls = 10
+        if num_dice > max_allowed_rolls:
+            response = f"{sender}, Please request a more reasonable number of rolls (up to {max_allowed_rolls}).\r\n"
+            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            return
+
+        # Enforce a limit on the maximum allowed die type (e.g., up to d999)
+        max_allowed_die = 999
+        if int(match.group(2)) > max_allowed_die:
+            response = f"{sender}, Please choose a die type with a value up to {max_allowed_die}.\r\n"
+            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            return
 
         # Map the die type to its maximum value
         dice_map = {
+            "d2": 2,
             "d4": 4,
             "d6": 6,
             "d8": 8,
@@ -402,19 +429,19 @@ class IRCBot:
             "d120": 120
         }
 
-        # Check if the die_type is in the predefined dice_map or if it's a custom dice size (e.g., d25, d30, etc.)
+        # Check if the die_type is in the predefined dice_map
         if die_type in dice_map:
             max_value = dice_map[die_type]
-        elif re.match(r'd(\d+)', die_type):
-            max_value = int(re.match(r'd(\d+)', die_type).group(1))
         else:
             response = f"{sender}, Invalid die type: {die_type}.\r\n"
             self.send_message(f'PRIVMSG {channel} :{response}\r\n')
             return
 
-        number = random.randint(1, max_value)
+        # Roll the dice the specified number of times, but limit to max_allowed_rolls
+        rolls = [random.randint(1, max_value) for _ in range(min(num_dice, max_allowed_rolls))]
 
-        action_message = f"{sender} has rolled a {number} on a {die_type}"
+        # Format the action message
+        action_message = f"{sender} has rolled {num_dice} {die_type}'s: {', '.join(map(str, rolls))}"
 
         print(f'Sending message: {action_message}')
         self.send_message(f'PRIVMSG {channel} :{action_message}\r\n')
@@ -648,7 +675,7 @@ def main():
     keep_alive_thread.start()
 
     while True:
-        data = bot.irc_socket.recv(2048).decode("UTF-8")
+        data = bot.irc_socket.recv(2048).decode("UTF-8", errors="replace")
         print(data)
 
         bot.respond_to_ping(data)
