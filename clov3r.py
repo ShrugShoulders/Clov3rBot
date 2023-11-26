@@ -184,6 +184,14 @@ class IRCBot:
             except re.error as e:
                 print(f"Error in regex pattern: {e}")
 
+    def is_raw_text_paste(self, url):
+        # Patterns for raw text pastes
+        raw_text_patterns = [
+            "pastebin.com/raw/",
+            "bpa.st/raw/", 
+        ]
+        return any(pattern in url for pattern in raw_text_patterns)
+
     def respond_to_message(self, data):
         if "PRIVMSG" in data:
             sender_match = re.match(r":([^!]+)!", data)
@@ -299,6 +307,15 @@ class IRCBot:
                     if self.filter_private_ip(url):
                         print(f"Ignoring URL with private IP address: {url}")
                         continue
+
+                    # Check if the URL is a raw text paste
+                    if self.is_raw_text_paste(url):
+                        paste_code = url.split("/")[-1]
+                        response = f"Raw paste: {paste_code}"
+                        self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+                        print(f"Sent: {response} to {channel}")
+                        continue
+
                     # Extract the full name of the file from the URL
                     file_name = url.split("/")[-1]
 
@@ -340,7 +357,7 @@ class IRCBot:
 
                 # Save the last command for the channel
                 self.last_command[channel] = message
-
+                
     def filter_private_ip(self, url):
         # Extract the hostname from the URL
         hostname = re.findall(r'https?://([^/]+)', url)
@@ -394,7 +411,8 @@ class IRCBot:
         # Use regular expression to parse the input
         match = re.match(r'(\d*)[dD](\d+)', args)
         if not match:
-            response = f"{sender}, Invalid roll format: {args}.\r\n"
+            available_dice = ', '.join(dice_map.keys())
+            response = f"{sender}, Invalid roll format: {args}. Available dice types: {available_dice}.\r\n"
             self.send_message(f'PRIVMSG {channel} :{response}\r\n')
             return
 
@@ -426,7 +444,8 @@ class IRCBot:
         if die_type in dice_map:
             max_value = dice_map[die_type]
         else:
-            response = f"{sender}, Invalid die type: {die_type}.\r\n"
+            available_dice = ', '.join(dice_map.keys())
+            response = f"{sender}, Invalid die type: {die_type}. Available dice types: {available_dice}.\r\n"
             self.send_message(f'PRIVMSG {channel} :{response}\r\n')
             return
 
