@@ -1,0 +1,2 @@
+White listed words go here
+you can use this for false positives for words that you've banned. 

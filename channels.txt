@@ -1,0 +1,5 @@
+EXAMPLE
+#irish 1
+Channels go here
+1 = sed enabled.
+0 = sed disabled.
