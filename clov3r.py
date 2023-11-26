@@ -391,7 +391,7 @@ class IRCBot:
         if not args:
             args = "1d20"
 
-        # Use regular expression to parse the input, allowing for custom dice expressions
+        # Use regular expression to parse the input
         match = re.match(r'(\d*)[dD](\d+)', args)
         if not match:
             response = f"{sender}, Invalid roll format: {args}.\r\n"
@@ -406,13 +406,6 @@ class IRCBot:
         max_allowed_rolls = 10
         if num_dice > max_allowed_rolls:
             response = f"{sender}, Please request a more reasonable number of rolls (up to {max_allowed_rolls}).\r\n"
-            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
-            return
-
-        # Enforce a limit on the maximum allowed die type (e.g., up to d999)
-        max_allowed_die = 999
-        if int(match.group(2)) > max_allowed_die:
-            response = f"{sender}, Please choose a die type with a value up to {max_allowed_die}.\r\n"
             self.send_message(f'PRIVMSG {channel} :{response}\r\n')
             return
 
