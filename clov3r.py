@@ -413,16 +413,17 @@ class IRCBot:
             args = "1d20"
 
         # Use regular expression to parse the input
-        match = re.match(r'(\d*)[dD](\d+)', args)
+        match = re.match(r'(\d*)[dD](\d+)([+\-]\d+)?', args)
         if not match:
             available_dice = ', '.join(dice_map.keys())
             response = f"{sender}, Invalid roll format: {args}. Available dice types: {available_dice}.\r\n"
             self.send_message(f'PRIVMSG {channel} :{response}\r\n')
             return
 
-        # Extract the number of dice and the type of each die
+        # Extract the number of dice, the type of each die, and the modifier
         num_dice = int(match.group(1)) if match.group(1) else 1
         die_type = f"d{match.group(2)}"
+        modifier = int(match.group(3)) if match.group(3) else 0
 
         # Set a reasonable limit on the number of dice rolls (e.g., 1000)
         max_allowed_rolls = 10
@@ -456,8 +457,11 @@ class IRCBot:
         # Roll the dice the specified number of times, but limit to max_allowed_rolls
         rolls = [random.randint(1, max_value) for _ in range(min(num_dice, max_allowed_rolls))]
 
+        # Apply the modifier
+        total = sum(rolls) + modifier
+
         # Format the action message
-        action_message = f"{sender} has rolled {num_dice} {die_type}'s: {', '.join(map(str, rolls))}"
+        action_message = f"{sender} has rolled {num_dice} {die_type}'s with a modifier of {modifier}: {', '.join(map(str, rolls))}. Total: {total}"
 
         print(f'Sending message: {action_message}')
         self.send_message(f'PRIVMSG {channel} :{action_message}\r\n')
