@@ -14,6 +14,7 @@ import sys
 import time
 import threading
 import configparser
+from datetime import datetime
 from collections import defaultdict
 from html import escape
 from bs4 import BeautifulSoup
@@ -190,14 +191,12 @@ class IRCBot:
             "pastebin.com/raw/",
             "bpa.st/raw/",
             "@raw",
-            "/r/",
         ]
         return any(pattern in url for pattern in raw_text_patterns)
 
-    def detect_and_handle_urls(self, sender, message, channel):
+    def detect_and_handle_urls(self, message, channel):
         # Check if the message starts with '@' symbol and contains a list of URLs
         if message.startswith("@"):
-            print(f"Ignoring processing URLs in the message starting with '@' symbol from {sender} in {channel}")
             return
         # Check if the message contains a URL
         url_matches = re.findall(r'(https?://\S+)', message)
@@ -355,7 +354,7 @@ class IRCBot:
                     self.handle_admin_commands(sender, message, full_hostmask, channel)
 
                 # Detect and handle URLs in the message
-                self.detect_and_handle_urls(channel, sender, message)
+                self.detect_and_handle_urls(message, channel)
 
                 # Save the last 10 messages for the channel
                 self.save_last_messages(channel, sender, message)
@@ -474,62 +473,65 @@ class IRCBot:
 
         command = command_match.group(1)
 
-        # Process other admin commands
-        if command == "quit":
-            self.handle_quit_command(channel)
+        # Process admin commands using match statement
+        match command:
+            case "quit":
+                self.handle_quit_command(channel)
 
-        elif command == "join":
-            # Extract the additional channel name
-            join_match = re.match(r"!join (.+)", message)
-            if join_match:
-                new_channel = join_match.group(1)
-                join_command = f"JOIN {new_channel}\r\n"
-                self.send_message(f'{join_command}\r\n')
-                self.channels.append(new_channel)  # Add the new channel to the list
-                print(f"Joined channel: {new_channel}")
+            case "join":
+                self.handle_join_command(message)
 
-        elif command == "part":
-            part_match = re.match(r"!part (.+)", message)
-            if part_match:
-                target_channel = part_match.group(1)
-                response = f"Acknowledged {sender}, leaving {target_channel}"
-                self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            case "part":
+                self.handle_part_command(sender, message, channel)
 
-                # Check if the target channel is in the list before removing
-                if target_channel in self.channels:
-                    part_command = f"PART {target_channel}\r\n"
-                    self.send_message(f'{part_command}\r\n')
-                    self.channels.remove(target_channel)  # Remove the channel from the list
-                    print(f"Left channel: {target_channel}")
-                else:
-                    part_command = f"PART {target_channel}\r\n"
-                    self.send_message(f'{part_command}\r\n')
-                    print(f"Channel {target_channel} not found in the list.")
-            else:
-                response = f"{sender}, usage: !part <channel>"
-                self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            case "reload":
+                self.handle_reload_command(sender, channel)
 
-        elif command == "reload":
-            self.reload_lists()
-            response = f"{sender}: Acknowledged... Reloaded"
+            case "op":
+                self.handle_op_command(sender, message, channel)
+
+            case "deop":
+                self.handle_deop_command(sender, message, channel)
+
+    def handle_deop_command(self, sender, message, channel):
+        if (deop_match := re.match(r"!deop(?: (\S+))?", message)):
+            target_user = deop_match.group(1) or sender
+            deop_command = f"MODE {channel} -o {target_user}\r\n"
+            self.send_message(deop_command)
+            print(f"Revoked operator status from {target_user} in {channel}")
+
+    def handle_op_command(self, sender, message, channel):
+        if (op_match := re.match(r"!op(?: (\S+))?", message)):
+            target_user = op_match.group(1) or sender
+            op_command = f"MODE {channel} +o {target_user}\r\n"
+            self.send_message(op_command)
+            print(f"Granted operator status to {target_user} in {channel}")
+
+    def handle_reload_command(self, sender, channel):
+        self.reload_lists()
+        response = f"{sender}: Acknowledged... Reloaded"
+        self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+        print(f"Sent: {response} to {channel}")
+
+    def handle_part_command(self, sender, message, channel):
+        if (part_match := re.match(r"!part (.+)", message)):
+            target_channel = part_match.group(1)
+            response = f"Acknowledged {sender}, leaving {target_channel}"
             self.send_message(f'PRIVMSG {channel} :{response}\r\n')
-            print(f"Sent: {response} to {channel}")
 
-        elif command == "op":
-            op_match = re.match(r"!op(?: (\S+))?", message)
-            if op_match:
-                target_user = op_match.group(1) or sender
-                op_command = f"MODE {channel} +o {target_user}\r\n"
-                self.send_message(op_command)
-                print(f"Granted operator status to {target_user} in {channel}")
-
-        elif command == "deop":
-            deop_match = re.match(r"!deop(?: (\S+))?", message)
-            if deop_match:
-                target_user = deop_match.group(1) or sender
-                deop_command = f"MODE {channel} -o {target_user}\r\n"
-                self.send_message(deop_command)
-                print(f"Revoked operator status from {target_user} in {channel}")
+            # Check if the target channel is in the list before removing
+            if target_channel in self.channels:
+                part_command = f"PART {target_channel}\r\n"
+                self.send_message(f'{part_command}\r\n')
+                self.channels.remove(target_channel)  # Remove the channel from the list
+                print(f"Left channel: {target_channel}")
+            else:
+                part_command = f"PART {target_channel}\r\n"
+                self.send_message(f'{part_command}\r\n')
+                print(f"Channel {target_channel} not found in the list.")
+        else:
+            response = f"{sender}, usage: !part <channel>"
+            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
 
     def handle_quit_command(self, channel):
         response = "Acknowledged, quitting..."
@@ -540,6 +542,14 @@ class IRCBot:
         time.sleep(1)
         self.irc_socket.close()
         sys.exit()
+
+    def handle_join_command(self, message):
+        if (join_match := re.match(r"!join (.+)", message)):
+            new_channel = join_match.group(1)
+            join_command = f"JOIN {new_channel}\r\n"
+            self.send_message(f'{join_command}\r\n')
+            self.channels.append(new_channel)  # Add the new channel to the list
+            print(f"Joined channel: {new_channel}")
 
     def handle_user_command(self, sender, message, full_hostmask, channel):
         # Extract the command from the message
@@ -552,121 +562,138 @@ class IRCBot:
 
         with self.lock:
             # Use the lock to create a critical section
-            if command == "hi":
-                response = f"Hello, {sender}!"
-                self.send_message(f'PRIVMSG {channel} :{response}\r\n')
-                print(f"Sent: {response} to {channel}")
+            match command:
+                case "hi":
+                    self.handle_hi_command(sender, channel)
 
-            elif command == "factoid":
-                self.send_random_mushroom_fact(channel)
+                case "factoid":
+                    self.send_random_mushroom_fact(channel)
 
-            elif command == "tell":
-                # Extract the target user and message from the command
-                tell_match = re.match(r"!tell (\S+) (.+)", message)
-                if tell_match:
-                    target_user = tell_match.group(1)
-                    tell_message = tell_match.group(2)
+                case "tell":
+                    self.handle_tell_command(sender, message, channel)
 
-                    # Check if the tell_message contains swears
-                    if self.is_swear(tell_message):
-                        self.send_message(f'PRIVMSG {channel} :Message contains a swear: Discarded.\r\n')
-                        return
+                case "info":
+                    self.handle_info_command(sender, channel)
 
-                    # Limit the number of saved messages to 5
-                    max_saved_messages = 5
-                    if target_user not in self.user_messages:
-                        self.user_messages[target_user] = []
+                case "topic":
+                    self.handle_topic_command(sender, channel)
 
-                    # Check if the limit has been reached
-                    if len(self.user_messages[target_user]) >= max_saved_messages:
-                        # Stop further processing for this command
-                        return
-
-                    # Save the new message with the current timestamp
-                    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
-                    self.user_messages[target_user].append((sender, tell_message, timestamp))
-
-                    response = f"{sender}, your message for {target_user} has been saved."
+                case "dab":
+                    response = f"{sender}: Yayy superwax! Enjoy :3"
                     self.send_message(f'PRIVMSG {channel} :{response}\r\n')
-                    print(f"Saved message for {target_user} from {sender} at {timestamp}")
 
-            elif command == "info":
-                response = f"Hiya! I'm Clov3r, a friendly IRC bot, {sender}! Please follow the rules: use !topic to see them. My protocols are in place to prevent the use of racial slurs and to maintain peace."
-                self.send_message(f'PRIVMSG {channel} :{response}\r\n')
-                print(f"Sent: {response} to {channel}")
+                case "help":
+                    self.send_help_message(message, channel, full_hostmask)
 
-            if command == "topic":
-                print(f"{self.channel_topics}")
-                # Check if the topic for the channel is already stored
-                if channel in self.channel_topics:
-                    topic = self.channel_topics[channel]
-                    response = f"{sender}: {topic}"
-                else:
-                    # Fetch the topic dynamically using the IRC TOPIC command
-                    self.send_message(f'TOPIC {channel}\r\n')
-                    data = self.irc_socket.recv(2048).decode("UTF-8")
-                    topic_match = re.match(r":[^ ]+ 332 [^ ]+ ([^ ]+) :(.+)", data)
+                case "moo":
+                    response = "Hi cow!"
+                    self.send_message(f'PRIVMSG {channel} :{response}\r\n')
 
-                    if topic_match:
-                        channel_name = topic_match.group(1)
-                        topic = topic_match.group(2)
+                case "moof":
+                    self.send_dog_cow_message(channel)
 
-                        # Save the topic in the dictionary for future reference
-                        self.channel_topics[channel] = topic
+                case "roll":
+                    self.dice_roll(re.match(r"!roll(?: (.+))?", message).group(1), channel, sender)
 
-                        response = f"{sender}: {topic}"
-                    else:
-                        response = f"{sender}, unable to fetch the topic for {channel}"
+                case _:
+                    # Default case, handle unknown command
+                    self.send_help_message(message, channel, full_hostmask)
 
-                self.send_message(f'PRIVMSG {channel} :{response}\r\n')
-                print(f"Sent: {response} to {channel}")
+    def send_help_message(self, message, channel, full_hostmask):
+        # Check if the message is exactly !help without additional characters
+        if message.strip() == "!help":
+            available_commands = [
+                "!hi: I will say hi",
+                "!tell <user> <message>: saves a message for a user",
+                "!info: for info",
+                "!topic: shows topic",
+                "!dab: :3",
+                "!help: HELP",
+                "!moo: Hi cow!",
+                "!moof: Shows Claris the dog cow",
+                "!roll d20: roll a dice, pick a type d1-9999",
+                "!factoid: show a mushroom fact.",
+                "!! to rerun last sent command",
+                "to use sed: s/wordtoreplace/replacement"
+            ]
 
-            elif command == "dab":
-                response = f"{sender}: Yayy superwax! Enjoy :3"
-                self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            user_nickname = full_hostmask.split('!')[0]
 
-            elif command == "help":
-                # Check if the message is exactly !help without additional characters
-                if message.strip() == "!help":
-                    available_commands = [
-                        "!hi: I will say hi",
-                        "!tell <user> <message>: saves a message for a user",
-                        "!info: for info",
-                        "!topic: shows topic",
-                        "!dab: :3",
-                        "!help: HELP",
-                        "!moo: Hi cow!",
-                        "!moof: Shows Claris the dog cow",
-                        "!roll d20: roll a dice, pick a type d1-9999",
-                        "!factoid: show a mushroom fact.",
-                        "!! to rerun last sent command",
-                        "to use sed: s/wordtoreplace/replacement"
-                    ]
+            for command_info in available_commands:
+                time.sleep(0.3)
+                # Send help notice to the channel
+                self.send_message(f'NOTICE {user_nickname} :[{channel}] {command_info}\r\n')
+                print(f"Sent NOTICE: {command_info} to {channel}")
 
-                    user_nickname = full_hostmask.split('!')[0]
+    def send_dog_cow_message(self, channel):
+        dog_cow = "https://i.imgur.com/NbH0AUG.png"
+        response = "Hello Claris, dog or cow?"
+        self.send_message(f'PRIVMSG {channel} :{response} {dog_cow}\r\n')
 
-                    for command_info in available_commands:
-                        time.sleep(0.3)
-                        # Send help notice to the channel
-                        self.send_message(f'NOTICE {user_nickname} :[{channel}] {command_info}\r\n')
-                        print(f"Sent NOTICE: {command_info} to {channel}")
+    def handle_info_command(self, sender, channel):
+        response = f"Hiya! I'm Clov3r, a friendly IRC bot, {sender}! Please follow the rules: use !topic to see them. My protocols are in place to prevent the use of racial slurs and to maintain peace."
+        self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+        print(f"Sent: {response} to {channel}")
 
-            elif command == "moo":
-                response = "Hi cow!"
-                self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+    def handle_topic_command(self, sender, channel):
+        # Check if the topic for the channel is already stored
+        if channel in self.channel_topics:
+            topic = self.channel_topics[channel]
+            response = f"{sender}: {topic}"
+        else:
+            # Fetch the topic dynamically using the IRC TOPIC command
+            self.send_message(f'TOPIC {channel}\r\n')
+            data = self.irc_socket.recv(2048).decode("UTF-8")
+            topic_match = re.match(r":[^ ]+ 332 [^ ]+ ([^ ]+) :(.+)", data)
 
-            elif command == "moof":
-                dog_cow = f"https://i.imgur.com/NbH0AUG.png"
-                response = f"Hello Claris, dog or cow?"
-                self.send_message(f'PRIVMSG {channel} :{response} {dog_cow}\r\n')
+            if topic_match:
+                channel_name = topic_match.group(1)
+                topic = topic_match.group(2)
 
-            elif command == "roll":
-                # Extract the arguments from the message
-                roll_match = re.match(r"!roll(?: (.+))?", message)
-                if roll_match:
-                    args = roll_match.group(1)
-                    # Call the dice_roll method
-                    self.dice_roll(args, channel, sender)
+                # Save the topic in the dictionary for future reference
+                self.channel_topics[channel] = topic
+
+                response = f"{sender}: {topic}"
+            else:
+                response = f"{sender}, unable to fetch the topic for {channel}"
+
+        self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+        print(f"Sent: {response} to {channel}")
+
+    def handle_hi_command(self, sender, channel):
+        response = f"Hello, {sender}!"
+        self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+        print(f"Sent: {response} to {channel}")
+
+    def handle_tell_command(self, sender, message, channel):
+        # Extract the target user and message from the command
+        tell_match = re.match(r"!tell (\S+) (.+)", message)
+        if tell_match:
+            target_user = tell_match.group(1)
+            tell_message = tell_match.group(2)
+
+            # Check if the tell_message contains swears
+            if self.is_swear(tell_message):
+                self.send_message(f'PRIVMSG {channel} :Message contains a swear: Discarded.\r\n')
+                return
+
+            # Limit the number of saved messages to 5
+            max_saved_messages = 5
+            if target_user not in self.user_messages:
+                self.user_messages[target_user] = []
+
+            # Check if the limit has been reached
+            if len(self.user_messages[target_user]) >= max_saved_messages:
+                # Stop further processing for this command
+                return
+
+            # Save the new message with the current timestamp
+            timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+            self.user_messages[target_user].append((sender, tell_message, timestamp))
+
+            response = f"{sender}, your message for {target_user} has been saved."
+            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            print(f"Saved message for {target_user} from {sender} at {timestamp}")
 
 def load_config(filename="config.ini"):
     config = configparser.ConfigParser()
