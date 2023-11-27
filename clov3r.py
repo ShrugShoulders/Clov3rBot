@@ -247,7 +247,7 @@ class IRCBot:
                     response = escape(webpage_title)
 
             # Send the response to the channel
-            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            self.send_message(f'PRIVMSG {channel} :[Website]: {response}\r\n')
             print(f"Sent: {response} to {channel}")
 
     def respond_to_message(self, data):
@@ -650,6 +650,7 @@ class IRCBot:
                 "!roll d20: roll a dice, pick a type d1-9999",
                 "!factoid: show a mushroom fact.",
                 "!! to rerun last sent command",
+                "!cast <spell> [fireball, magicmissile, lightningbolt, and icestorm]",
                 "to use sed: s/wordtoreplace/replacement"
             ]
 
