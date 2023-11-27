@@ -460,8 +460,9 @@ class IRCBot:
         # Apply the modifier
         total = sum(rolls) + modifier
 
-        # Format the action message
-        action_message = f"{sender} has rolled {num_dice} {die_type}'s with a modifier of {modifier}: {', '.join(map(str, rolls))}. Total: {total}"
+        # Format the action message with both individual rolls and total
+        individual_rolls = ', '.join(map(str, rolls))
+        action_message = f"{sender} has rolled {num_dice} {die_type}'s modifier of {modifier}: {individual_rolls}. Total: {total}"
 
         print(f'Sending message: {action_message}')
         self.send_message(f'PRIVMSG {channel} :{action_message}\r\n')
@@ -599,9 +600,40 @@ class IRCBot:
                 case "roll":
                     self.dice_roll(re.match(r"!roll(?: (.+))?", message).group(1), channel, sender)
 
+                case "cast":
+                    self.handle_spell_cast(sender, message, channel, full_hostmask)
+
                 case _:
                     # Default case, handle unknown command
                     self.send_help_message(message, channel, full_hostmask)
+
+    def handle_spell_cast(self, sender, message, channel, full_hostmask):
+        if not message:
+            # If no message is provided, send a help message
+            self.send_help_message("!cast", channel, full_hostmask)
+            return
+
+        # Extract the spell_name and target_person from the message
+        match = re.match(r"!cast (\S+)\s+(\S+)", message)
+        if not match:
+            # Invalid command format, send a help message
+            self.send_help_message("!cast", channel, full_hostmask)
+        else:
+            spell_name = match.group(1)
+            target_person = match.group(2)  # Use group(2) for the target_person
+            total_damage = self.calculate_spell_damage(spell_name)
+            response = f"{sender} has cast {spell_name} on target {target_person} for {total_damage} damage!"
+            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+
+    def calculate_spell_damage(self, spell_name):
+        spell_damage = {
+            "fireball": sum(random.randint(1, 6) for _ in range(8)), # Fireball
+            "magicmissile": random.randint(1, 4), # Magic Missile
+            "lightningbolt": sum(random.randint(1, 8) for _ in range(5)),  # Lightning Bolt
+            "icestorm": sum(random.randint(1, 6) for _ in range(10))  # Ice Storm
+            # Add more spells and their damage calculations
+        }
+        return spell_damage.get(spell_name, 0)
 
     def send_help_message(self, message, channel, full_hostmask):
         # Check if the message is exactly !help without additional characters
