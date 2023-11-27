@@ -192,6 +192,59 @@ class IRCBot:
         ]
         return any(pattern in url for pattern in raw_text_patterns)
 
+    def detect_and_handle_urls(self, message, channel):
+        # Check if the message contains a URL
+        url_matches = re.findall(r'(https?://\S+)', message)
+        for url in url_matches:
+            # Filter out URLs with private IP addresses
+            if self.filter_private_ip(url):
+                print(f"Ignoring URL with private IP address: {url}")
+                continue
+
+            # Check if the URL is a raw text paste
+            if self.is_raw_text_paste(url):
+                paste_code = url.split("/")[-1]
+                response = f"Raw paste: {paste_code}"
+                self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+                print(f"Sent: {response} to {channel}")
+                continue
+
+            # Extract the full name of the file from the URL
+            file_name = url.split("/")[-1]
+
+            # Check if the URL ends with a file extension
+            if "." in file_name:
+                file_extension = file_name.split(".")[-1].lower()
+            else:
+                file_extension = None
+
+            # Check if the URL is a GitHub file URL with a line range
+            if "github.com" in url and "/blob/" in url and "#L" in url:
+                response = f"GitHub file URL with line range"
+            else:
+                # Extract the webpage title, sanitize it using bleach and the new function
+                webpage_title = self.sanitize_input(self.extract_webpage_title(url))
+
+                # Check if the URL contains a swear word in the file name or webpage title
+                if self.is_swear(file_name) or self.is_swear(webpage_title):
+                    print(f"Ignoring URL with swear word in title: {url}")
+                    continue
+
+                # Process the URL based on its file extension
+                if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
+                    response = f"image file: {file_name}"
+                elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
+                    response = f"media file: {file_name}"
+                elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt"]:
+                    response = f"data file: {file_name}"
+                else:
+                    # Sanitize the response before sending it to the channel
+                    response = escape(webpage_title)
+
+            # Send the response to the channel
+            self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+            print(f"Sent: {response} to {channel}")
+
     def respond_to_message(self, data):
         if "PRIVMSG" in data:
             sender_match = re.match(r":([^!]+)!", data)
@@ -263,9 +316,9 @@ class IRCBot:
                             ip_address = ip_match.group(1)
 
                             # Ban the user based on IP address for the current channel
-                            #ban_command = f"MODE {channel} +b !*@*{ip_address}\r\n"
-                            #self.send_message(f'PRIVMSG {ban_command}')
-                            #print(f"Banned {full_hostmask} for using a swear word in {channel}.")
+                            # ban_command = f"MODE {channel} +b !*@*{ip_address}\r\n"
+                            # self.send_message(f'PRIVMSG {ban_command}')
+                            # print(f"Banned {full_hostmask} for using a swear word in {channel}.")
 
                             # Kick the user from the current channel
                             kick_command = f"KICK {channel} {sender} :You have been kicked for using a swear word.\r\n"
@@ -300,64 +353,15 @@ class IRCBot:
                     print(f"Ignoring processing URLs in the message starting with '@' symbol from {sender} in {channel}")
                     return
 
-                # Check if the message contains a URL
-                url_matches = re.findall(r'(https?://\S+)', message)
-                for url in url_matches:
-                    # Filter out URLs with private IP addresses
-                    if self.filter_private_ip(url):
-                        print(f"Ignoring URL with private IP address: {url}")
-                        continue
-
-                    # Check if the URL is a raw text paste
-                    if self.is_raw_text_paste(url):
-                        paste_code = url.split("/")[-1]
-                        response = f"Raw paste: {paste_code}"
-                        self.send_message(f'PRIVMSG {channel} :{response}\r\n')
-                        print(f"Sent: {response} to {channel}")
-                        continue
-
-                    # Extract the full name of the file from the URL
-                    file_name = url.split("/")[-1]
-
-                    # Check if the URL ends with a file extension
-                    if "." in file_name:
-                        file_extension = file_name.split(".")[-1].lower()
-                    else:
-                        file_extension = None
-
-                    # Check if the URL is a GitHub file URL with a line range
-                    if "github.com" in url and "/blob/" in url and "#L" in url:
-                        response = f"GitHub file URL with line range"
-                    else:
-                        # Extract the webpage title, sanitize it using bleach and the new function
-                        webpage_title = self.sanitize_input(self.extract_webpage_title(url))
-
-                        # Check if the URL contains a swear word in the file name or webpage title
-                        if self.is_swear(file_name) or self.is_swear(webpage_title):
-                            print(f"Ignoring URL with swear word in title: {url}")
-                            continue
-
-                        # Process the URL based on its file extension
-                        if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
-                            response = f"image file: {file_name}"
-                        elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
-                            response = f"media file: {file_name}"
-                        elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt"]:
-                            response = f"data file: {file_name}"
-                        else:
-                            # Sanitize the response before sending it to the channel
-                            response = escape(webpage_title)
-
-                    # Send the response to the channel
-                    self.send_message(f'PRIVMSG {channel} :{response}\r\n')
-                    print(f"Sent: {response} to {channel}")
+                # Detect and handle URLs in the message
+                self.detect_and_handle_urls(message, channel)
 
                 # Save the last 10 messages for the channel
                 self.save_last_messages(channel, sender, message)
 
                 # Save the last command for the channel
                 self.last_command[channel] = message
-                
+
     def filter_private_ip(self, url):
         # Extract the hostname from the URL
         hostname = re.findall(r'https?://([^/]+)', url)
@@ -631,6 +635,7 @@ class IRCBot:
                         "!dab: :3",
                         "!help: HELP",
                         "!moo: Hi cow!",
+                        "!moof: Shows Claris the dog cow",
                         "!roll d20: roll a dice, pick a type d1-9999",
                         "!factoid: show a mushroom fact.",
                         "!! to rerun last sent command",
@@ -648,6 +653,11 @@ class IRCBot:
             elif command == "moo":
                 response = "Hi cow!"
                 self.send_message(f'PRIVMSG {channel} :{response}\r\n')
+
+            elif command == "moof":
+                dog_cow = f"https://i.imgur.com/NbH0AUG.png"
+                response = f"Hello Claris, dog or cow?"
+                self.send_message(f'PRIVMSG {channel} :{response} {dog_cow}\r\n')
 
             elif command == "roll":
                 # Extract the arguments from the message
