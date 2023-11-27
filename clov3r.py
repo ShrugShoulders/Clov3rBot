@@ -188,11 +188,17 @@ class IRCBot:
         # Patterns for raw text pastes
         raw_text_patterns = [
             "pastebin.com/raw/",
-            "bpa.st/raw/", 
+            "bpa.st/raw/",
+            "@raw",
+            "/r/",
         ]
         return any(pattern in url for pattern in raw_text_patterns)
 
-    def detect_and_handle_urls(self, message, channel):
+    def detect_and_handle_urls(self, sender, message, channel):
+        # Check if the message starts with '@' symbol and contains a list of URLs
+        if message.startswith("@"):
+            print(f"Ignoring processing URLs in the message starting with '@' symbol from {sender} in {channel}")
+            return
         # Check if the message contains a URL
         url_matches = re.findall(r'(https?://\S+)', message)
         for url in url_matches:
@@ -235,7 +241,7 @@ class IRCBot:
                     response = f"image file: {file_name}"
                 elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
                     response = f"media file: {file_name}"
-                elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt"]:
+                elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt", "pdf"]:
                     response = f"data file: {file_name}"
                 else:
                     # Sanitize the response before sending it to the channel
@@ -348,13 +354,8 @@ class IRCBot:
                     self.handle_user_command(sender, message, full_hostmask, channel)
                     self.handle_admin_commands(sender, message, full_hostmask, channel)
 
-                # Check if the message starts with '@' symbol and contains a list of URLs
-                if message.startswith("@"):
-                    print(f"Ignoring processing URLs in the message starting with '@' symbol from {sender} in {channel}")
-                    return
-
                 # Detect and handle URLs in the message
-                self.detect_and_handle_urls(message, channel)
+                self.detect_and_handle_urls(channel, sender, message)
 
                 # Save the last 10 messages for the channel
                 self.save_last_messages(channel, sender, message)
