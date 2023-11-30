@@ -2,6 +2,7 @@ import asyncio
 import ssl
 import threading
 import time
+import random
 import requests
 import re
 import html
@@ -13,14 +14,17 @@ from html import escape
 from collections import deque
 
 class IRCBot:
-    def __init__(self, nickname, channel, server, port=6697, use_ssl=True, admin_list=None):
+    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None):
         self.nickname = nickname
-        self.channel = channel
+        self.channels = channels if isinstance(channels, list) else [channels]
+        self.nickserv_password = nickserv_password
         self.server = server
         self.port = port
         self.use_ssl = use_ssl
         self.admin_list = set(admin_list) if admin_list else set()
         self.last_messages = deque(maxlen=10)
+        self.mushroom_facts = []
+        self.message_queue = {}
         self.reader = None
         self.writer = None
         self.lock = asyncio.Lock()
@@ -32,14 +36,25 @@ class IRCBot:
         config.read(config_file)
         bot_config = config['BotConfig']
         admin_list = config.get('AdminConfig', 'admin_list', fallback='').split(',')
+        channels = bot_config.get('channels').split(',')
+        nickserv_password = bot_config.get('nickserv_password', fallback=None)
+
         return cls(
             nickname=bot_config.get('nickname'),
-            channel=bot_config.get('channel'),
+            channels=channels,
             server=bot_config.get('server'),
             port=int(bot_config.get('port', 6697)),
             use_ssl=bot_config.getboolean('use_ssl', True),
-            admin_list=admin_list
+            admin_list=admin_list,
+            nickserv_password=nickserv_password
         )
+
+    def load_mushroom_facts(self):
+        try:
+            with open("mushroom_facts.txt", "r") as file:
+                self.mushroom_facts = [line.strip() for line in file.readlines()]
+        except FileNotFoundError:
+            print("Mushroom facts file not found.")
 
     async def connect(self):
         if self.use_ssl:
@@ -51,11 +66,30 @@ class IRCBot:
         self.send(f"USER {self.nickname} 0 * :{self.nickname}")
         self.send(f"NICK {self.nickname}")
 
+    async def identify_with_nickserv(self):
+        motd_received = False
+        while True:
+            data = await self.reader.read(2048)
+            message = data.decode("UTF-8")
+            print(message)
+
+            if "376" in message:  # End of MOTD
+                self.send(f'PRIVMSG NickServ :IDENTIFY {self.nickname} {self.nickserv_password}\r\n')
+                print("Sent NickServ authentication.")  # End of MOTD
+                motd_received = True
+
+            if motd_received and "396" in message:  # NickServ authentication successful
+                for channel in self.channels:
+                    await self.join_channel(channel)
+                print("Joined channels after NickServ authentication.")
+                break
+
     def send(self, message):
         self.writer.write((message + '\r\n').encode())
 
-    async def join_channel(self):
-        self.send(f"JOIN {self.channel}")
+    async def join_channel(self, channel):
+        self.send(f"JOIN {channel}")
+        await asyncio.sleep(0.3)
 
     async def keep_alive(self):
         while True:
@@ -94,6 +128,7 @@ class IRCBot:
                 await self.user_commands(message)
                 await self.detect_and_parse_urls(message)
                 await self.save_message(message)
+                await self.send_saved_messages(message)
 
         print("Disconnecting...")
         await self.disconnect()
@@ -150,7 +185,6 @@ class IRCBot:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 title = await self.sanitize_input(soup.title.string.strip()) if soup.title else "No title found"
 
-                # Integrate detect_and_handle_urls logic
                 # Check if the message starts with '@' symbol and contains a list of URLs
                 if content.startswith("@"):
                     return
@@ -227,16 +261,91 @@ class IRCBot:
         if content.startswith('s/'):
             await self.handle_sed_command(channel, sender, content)
         else:
-            # Handle other commands as before
             match content.split()[0]:
                 case '!hi':
+                    # Says hi (like ping)
                     response = f"PRIVMSG {channel} :Hi {sender}!"
                     self.send(response)
 
+                case "!factoid":
+                    # MUSHROOM FACTS
+                    self.send_random_mushroom_fact(channel)
+
+                case '!tell':
+                    # Save a message for a user
+                    await self.handle_tell_command(channel, sender, content)
+
                 case '!quit' if hostmask in self.admin_list:
+                    # Quits the bot from the network.
                     response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
                     self.send(response)
                     disconnect_requested = True
+
+                case '!op' if hostmask in self.admin_list:
+                    # Op the user
+                    self.send(f"MODE {channel} +o {sender}\r\n")
+
+                case '!deop' if hostmask in self.admin_list:
+                    # Deop the user
+                    self.send(f"MODE {channel} -o {sender}\r\n")
+
+                case '!botop' if hostmask in self.admin_list:
+                    # Op the bot using Chanserv
+                    self.send(f"PRIVMSG Chanserv :OP {channel} {self.nickname}\r\n")
+
+                case '!join' if hostmask in self.admin_list:
+                    # Join a specified channel
+                    if len(content.split()) >= 2:
+                        new_channel = content.split()[1]
+                        self.send(f"JOIN {new_channel}\r\n")
+
+                case '!part' if hostmask in self.admin_list:
+                    # Part from a specified channel
+                    if len(content.split()) >= 2:
+                        part_channel = content.split()[1]
+                        self.send(f"PART {part_channel}\r\n")
+
+    async def handle_tell_command(self, channel, sender, content):
+        try:
+            # Parse the command: !tell username message
+            _, username, message = content.split(' ', 2)
+
+            # Check if the user exists in the message_queue
+            if username not in self.message_queue:
+                self.message_queue[username] = []
+
+            # Save the message for the user
+            self.message_queue[username].append((sender, message))
+
+            # Notify the user that the message is saved
+            response = f"PRIVMSG {channel} :{sender}, I'll tell {username} that when they return."
+            self.send(response)
+        except ValueError:
+            response = f"PRIVMSG {channel} :Invalid !tell command format. Use: !tell username message"
+            self.send(response)
+
+    async def send_saved_messages(self, message):
+        sender_match = re.match(r":(\S+)!\S+@\S+", message)
+        sender = sender_match.group(1) if sender_match else "Unknown Sender"
+        channel = message.split('PRIVMSG')[1].split(':')[0].strip()
+
+        # Check if there are saved messages for the current user
+        if sender in self.message_queue and self.message_queue[sender]:
+            # Send each saved message to the user
+            for sender_saved, saved_message in self.message_queue[sender]:
+                response = f"PRIVMSG {channel} :{sender_saved}, {sender} wanted to tell you: {saved_message}\r\n"
+                self.send(response)
+                print(f"Sent saved message to {channel}: {response}")
+
+            # Clear the saved messages for the user
+            del self.message_queue[sender]
+
+    def send_random_mushroom_fact(self, channel):
+        if self.mushroom_facts:
+            random_fact = random.choice(self.mushroom_facts)
+            self.send(f"PRIVMSG {channel} :{random_fact}\r\n")
+
+            print(f"Sent mushroom fact to {channel}: {random_fact}")
 
     async def handle_sed_command(self, channel, sender, content):
         try:
@@ -286,9 +395,15 @@ class IRCBot:
 
     async def main_loop(self):
         try:
+            self.load_mushroom_facts()
             await self.connect()
-            await self.join_channel()
 
+            # Identify with NickServ
+            await self.identify_with_nickserv()
+            for channel in self.channels:
+                await self.join_channel(channel)
+
+            # Rest of the existing main_loop method
             keep_alive_task = asyncio.create_task(self.keep_alive())
             handle_messages_task = asyncio.create_task(self.handle_messages())
 
