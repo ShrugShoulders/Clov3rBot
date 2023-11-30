@@ -261,11 +261,18 @@ class IRCBot:
         if content.startswith('s/'):
             await self.handle_sed_command(channel, sender, content)
         else:
-            match content.split()[0]:
+            command = content.split()[0]
+            args = content[len(command):].strip()
+
+            match command:
                 case '!hi':
                     # Says hi (like ping)
                     response = f"PRIVMSG {channel} :Hi {sender}!"
                     self.send(response)
+
+                case '!roll':
+                    # Roll the dice
+                    await self.dice_roll(args, channel, sender)
 
                 case "!factoid":
                     # MUSHROOM FACTS
@@ -295,15 +302,77 @@ class IRCBot:
 
                 case '!join' if hostmask in self.admin_list:
                     # Join a specified channel
-                    if len(content.split()) >= 2:
-                        new_channel = content.split()[1]
+                    if args:
+                        new_channel = args.split()[0]
                         self.send(f"JOIN {new_channel}\r\n")
 
                 case '!part' if hostmask in self.admin_list:
                     # Part from a specified channel
-                    if len(content.split()) >= 2:
-                        part_channel = content.split()[1]
+                    if args:
+                        part_channel = args.split()[0]
                         self.send(f"PART {part_channel}\r\n")
+
+    async def dice_roll(self, args, channel, sender):
+        print("Dice roll requested...")
+
+        # Map the die type to its maximum value
+        dice_map = {
+            "d2": 2,
+            "d4": 4,
+            "d6": 6,
+            "d8": 8,
+            "d10": 10,
+            "d100": 100,
+            "d12": 12,
+            "d20": 20,
+            "d120": 120
+        }
+
+        # Default to 1d20 if no arguments are provided
+        if not args:
+            args = "1d20"
+
+        # Use regular expression to parse the input
+        match = re.match(r'(\d*)[dD](\d+)([+\-]\d+)?', args)
+        if not match:
+            available_dice = ', '.join(dice_map.keys())
+            response = f"{sender}, Invalid roll format: {args}. Available dice types: {available_dice}.\r\n"
+            self.send(f'PRIVMSG {channel} :{response}\r\n')
+            return
+
+        # Extract the number of dice, the type of each die, and the modifier
+        num_dice = int(match.group(1)) if match.group(1) else 1
+        die_type = f"d{match.group(2)}"
+        modifier = int(match.group(3)) if match.group(3) else 0
+
+        # Set a reasonable limit on the number of dice rolls (e.g., 1000)
+        max_allowed_rolls = 10
+        if num_dice > max_allowed_rolls:
+            response = f"{sender}, Please request a more reasonable number of rolls (up to {max_allowed_rolls}).\r\n"
+            self.send(f'PRIVMSG {channel} :{response}\r\n')
+            return
+
+        # Check if the die_type is in the predefined dice_map
+        if die_type in dice_map:
+            max_value = dice_map[die_type]
+        else:
+            available_dice = ', '.join(dice_map.keys())
+            response = f"{sender}, Invalid die type: {die_type}. Available dice types: {available_dice}.\r\n"
+            self.send(f'PRIVMSG {channel} :{response}\r\n')
+            return
+
+        # Roll the dice the specified number of times, but limit to max_allowed_rolls
+        rolls = [random.randint(1, max_value) for _ in range(min(num_dice, max_allowed_rolls))]
+
+        # Apply the modifier
+        total = sum(rolls) + modifier
+
+        # Format the action message with both individual rolls and total
+        individual_rolls = ', '.join(map(str, rolls))
+        action_message = f"{sender} has rolled {num_dice} {die_type}'s modifier of {modifier}: {individual_rolls}. Total: {total}"
+
+        print(f'Sending message: {action_message}')
+        self.send(f'PRIVMSG {channel} :{action_message}\r\n')
 
     async def handle_tell_command(self, channel, sender, content):
         try:
@@ -315,7 +384,7 @@ class IRCBot:
                 self.message_queue[username] = []
 
             # Save the message for the user
-            self.message_queue[username].append((sender, message))
+            self.message_queue[username].append((username, sender, message))
 
             # Notify the user that the message is saved
             response = f"PRIVMSG {channel} :{sender}, I'll tell {username} that when they return."
@@ -332,8 +401,8 @@ class IRCBot:
         # Check if there are saved messages for the current user
         if sender in self.message_queue and self.message_queue[sender]:
             # Send each saved message to the user
-            for sender_saved, saved_message in self.message_queue[sender]:
-                response = f"PRIVMSG {channel} :{sender_saved}, {sender} wanted to tell you: {saved_message}\r\n"
+            for _, recipient, saved_message in self.message_queue[sender]:
+                response = f"PRIVMSG {channel} :{sender}, {recipient} wanted to tell you: {saved_message}\r\n"
                 self.send(response)
                 print(f"Sent saved message to {channel}: {response}")
 
@@ -349,21 +418,16 @@ class IRCBot:
 
     async def handle_sed_command(self, channel, sender, content):
         try:
-            # Add the missing third slash if not provided
-            if content.count('/') == 1:
-                content += '/'
-
             # Extract old, new, and flags using regex
-            match = re.match(r's/(.*?)/(.*?)/?([gi]*)$', content)
+            match = re.match(r's/(.*?)/(.*?)(?:/([gi]*))?$', content)
             if match:
                 old, new, flags = match.groups()
             else:
                 raise ValueError("Invalid sed command format")
 
-            # Get the last message from the deque
-            last_message = self.last_messages[-1] if self.last_messages else None
-
-            if last_message:
+            # Iterate over the entire message history and replace matching messages
+            corrected_message = None
+            for original_message in reversed(self.last_messages):
                 # Handle regex flags
                 regex_flags = re.IGNORECASE if 'i' in flags else 0
 
@@ -371,14 +435,31 @@ class IRCBot:
                 count = 0 if 'g' in flags else 1
 
                 # Replace old with new using regex substitution
-                corrected_message = re.sub(old, new, last_message, flags=regex_flags, count=count)
+                corrected_message = re.sub(old, new, original_message, flags=regex_flags, count=count)
+
+                # Check if the corrected message is different from the original
+                if corrected_message != original_message:
+                    break  # Stop when the first corrected message is found
+
+            if corrected_message:
+                # Send the corrected message to the channel
                 response = f"PRIVMSG {channel} :[Sed] {corrected_message}\r\n"
                 self.send(response)
                 print(f"Sent: {response} to {channel}")
+
+                # Apply the sed command to the message text in the message_queue
+                for recipient, saved_sender, message in self.message_queue.get(sender, []):
+                    # Use negative lookbehind to exclude the sender's nickname
+                    corrected_message = re.sub(fr"(?<!\S){re.escape(saved_sender)}{re.escape(old)}(?!\S)", new, message, flags=regex_flags, count=count)
+                    response = f"PRIVMSG {channel} :[Sed] {corrected_message}\r\n"
+                    self.send(response)
+                    print(f"Sent: {response} to {channel}")
+
             else:
-                response = f"PRIVMSG {channel} :[Sed] No previous message to correct\r\n"
+                response = f"PRIVMSG {channel} :[Sed] No matching message found to correct\r\n"
                 self.send(response)
                 print(f"Sent: {response} to {channel}")
+
         except re.error as e:
             response = f"PRIVMSG {channel} :[Sed] Invalid sed command: {str(e)}\r\n"
             self.send(response)
