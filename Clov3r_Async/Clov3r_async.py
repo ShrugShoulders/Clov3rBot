@@ -9,6 +9,7 @@ import html
 import configparser
 import ipaddress
 import bleach
+from typing import Optional
 from bs4 import BeautifulSoup
 from html import escape
 from collections import deque
@@ -106,12 +107,13 @@ class IRCBot:
             safe_output = title_match.group(1)
         return safe_output
 
-    async def save_message(self, message):
+    async def save_message(self, message, channel):
         sender_match = re.match(r":(\S+)!\S+@\S+", message)
         sender = sender_match.group(1) if sender_match else "Unknown Sender"
         content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
 
         formatted_message = {
+            "channel": channel,
             "sender": sender,
             "content": content
         }
@@ -128,13 +130,26 @@ class IRCBot:
             if "PING" in message:
                 self.send("PONG " + message.split()[1])
             elif "PRIVMSG" in message:
+                # Extract channel information
+                channel = message.split('PRIVMSG')[1].split(':')[0].strip()
                 await self.user_commands(message)
                 await self.detect_and_parse_urls(message)
-                await self.save_message(message)
+                await self.save_message(message, channel)
                 await self.send_saved_messages(message)
 
         print("Disconnecting...")
         await self.disconnect()
+
+    async def get_channel_topic(self, channel: str) -> Optional[str]:
+        self.send(f"TOPIC {channel}")
+        data = await self.reader.read(2048)
+        message = data.decode("UTF-8")
+
+        if "332" in message:  # TOPIC message
+            topic = message.split(":", 2)[2].strip()
+            return topic
+        else:
+            return None
 
     def is_raw_text_paste(self, url):
         # Patterns for raw text pastes
@@ -241,6 +256,36 @@ class IRCBot:
             except Exception as e:
                 print(f"Error fetching or parsing URL: {e}")
 
+    def get_available_commands(self):
+        # List all available commands (excluding admin commands)
+        commands = [
+            "!hi",
+            "!roll",
+            "!factoid",
+            "!tell <user> <message>",
+            "!info",
+            "!topic",
+            "!moo",
+            "!moof",
+            "!help",
+            # Add more commands as needed
+        ]
+        return commands
+
+    async def help_command(self, channel, sender):
+        # Get the list of available commands
+        commands = self.get_available_commands()
+
+        # Send the list of commands to the channel
+        response = f"PRIVMSG {channel} :{sender}, Commands: {', '.join(commands)}\r\n"
+        self.send(response)
+        print(f"Sent: {response} to {channel}")
+
+    def send_dog_cow_message(self, channel):
+        dog_cow = "https://i.imgur.com/NbH0AUG.png"
+        response = "Hello Claris, dog or cow?"
+        self.send(f'PRIVMSG {channel} :{response} {dog_cow}\r\n')
+
     async def user_commands(self, message):
         global disconnect_requested
         sender_match = re.match(r":(\S+)!\S+@\S+", message)
@@ -289,6 +334,27 @@ class IRCBot:
 
                     case '!info':
                         self.handle_info_command(channel, sender)
+
+                    case '!moo':
+                        response = "Hi cow!"
+                        self.send(f'PRIVMSG {channel} :{response}\r\n')
+
+                    case '!moof':
+                        self.send_dog_cow_message(channel)
+
+                    case '!topic':
+                        # Get and send the channel topic
+                        topic = await self.get_channel_topic(channel)
+                        if topic:
+                            response = f"PRIVMSG {channel} :{topic}\r\n"
+                        else:
+                            response = f"PRIVMSG {channel} :Unable to retrieve the topic\r\n"
+                        self.send(response)
+                        print(f"Sent: {response} to {channel}")
+
+                    case '!help':
+                        # Handle the help command
+                        await self.help_command(channel, sender)
 
                     case '!quit' if hostmask in self.admin_list:
                         # Quits the bot from the network.
@@ -347,15 +413,15 @@ class IRCBot:
             # Check for custom dice notation
             custom_match = re.match(r'(\d+)[dD](\d+)([+\-]\d+)?', args)
             if not custom_match:
-                available_dice = ', '.join(dice_map.keys())
-                response = f"{sender}, Invalid roll format: {args}. Available dice types: {available_dice}.\r\n"
-                self.send(f'PRIVMSG {channel} :{response}\r\n')
-                return
-
-            # Extract the number of dice, the type of each die, and the modifier for custom dice
-            num_dice = int(custom_match.group(1))
-            die_type = f"d{custom_match.group(2)}"
-            modifier = int(custom_match.group(3)) if custom_match.group(3) else 0
+                # If no match, default to d20
+                num_dice = 1
+                die_type = "d20"
+                modifier = 0
+            else:
+                # Extract the number of dice, the type of each die, and the modifier for custom dice
+                num_dice = int(custom_match.group(1))
+                die_type = f"d{custom_match.group(2)}"
+                modifier = int(custom_match.group(3)) if custom_match.group(3) else 0
         else:
             # Extract the number of dice, the type of each die, and the modifier for standard dice
             num_dice = int(match.group(1)) if match.group(1) else 1
@@ -452,9 +518,12 @@ class IRCBot:
 
             print(f"Processing sed command - Old: {old}, New: {new}, Flags: {flags}")
 
-            # Iterate over the entire message history and replace matching messages
+            # Iterate over the entire message history for the specified channel and replace matching messages
             corrected_message = None
             for formatted_message in reversed(self.last_messages):
+                if formatted_message["channel"] != channel:
+                    continue  # Skip messages from other channels
+
                 original_message = formatted_message["content"]
                 original_sender = formatted_message["sender"]
 
@@ -467,14 +536,16 @@ class IRCBot:
                 count = 0 if 'g' in flags else 1
 
                 # Replace old with new using regex substitution
-                corrected_message = re.sub(old, new, original_message, flags=regex_flags, count=count)
+                replaced_message = re.sub(old, new, original_message, flags=regex_flags, count=count)
 
-                # Check if the corrected message is different from the original
-                if corrected_message != original_message:
+                # Check if the message was actually replaced
+                if replaced_message != original_message:
+                    corrected_message = replaced_message
                     print(f"Match found - Corrected: {corrected_message}")
                     break  # Stop when the first corrected message is found
 
-            if corrected_message:
+            # Check if a match was found
+            if corrected_message is not None:
                 # Send the corrected message to the channel
                 response = f"PRIVMSG {channel} :[Sed] <{original_sender}> {corrected_message}\r\n"
                 self.send(response)
