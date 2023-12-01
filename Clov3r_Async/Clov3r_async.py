@@ -261,59 +261,69 @@ class IRCBot:
         print(f"Full Hostmask: {hostmask}")
 
         # Check if the message starts with 's/' for sed-like command
-        if content.startswith('s/'):
+        if content and content.startswith('s/'):
             await self.handle_sed_command(channel, sender, content)
         else:
-            command = content.split()[0]
-            args = content[len(command):].strip()
+            # Check if there are any words in the content before accessing the first word
+            if content:
+                command = content.split()[0]
+                args = content[len(command):].strip()
 
-            match command:
-                case '!hi':
-                    # Says hi (like ping)
-                    response = f"PRIVMSG {channel} :Hi {sender}!"
-                    self.send(response)
+                match command:
+                    case '!hi':
+                        # Says hi (like ping)
+                        response = f"PRIVMSG {channel} :Hi {sender}!"
+                        self.send(response)
 
-                case '!roll':
-                    # Roll the dice
-                    await self.dice_roll(args, channel, sender)
+                    case '!roll':
+                        # Roll the dice
+                        await self.dice_roll(args, channel, sender)
 
-                case "!factoid":
-                    # MUSHROOM FACTS
-                    self.send_random_mushroom_fact(channel)
+                    case "!factoid":
+                        # MUSHROOM FACTS
+                        self.send_random_mushroom_fact(channel)
 
-                case '!tell':
-                    # Save a message for a user
-                    await self.handle_tell_command(channel, sender, content)
+                    case '!tell':
+                        # Save a message for a user
+                        await self.handle_tell_command(channel, sender, content)
 
-                case '!quit' if hostmask in self.admin_list:
-                    # Quits the bot from the network.
-                    response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
-                    self.send(response)
-                    disconnect_requested = True
+                    case '!info':
+                        self.handle_info_command(channel, sender)
 
-                case '!op' if hostmask in self.admin_list:
-                    # Op the user
-                    self.send(f"MODE {channel} +o {sender}\r\n")
+                    case '!quit' if hostmask in self.admin_list:
+                        # Quits the bot from the network.
+                        response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
+                        self.send(response)
+                        disconnect_requested = True
 
-                case '!deop' if hostmask in self.admin_list:
-                    # Deop the user
-                    self.send(f"MODE {channel} -o {sender}\r\n")
+                    case '!op' if hostmask in self.admin_list:
+                        # Op the user
+                        self.send(f"MODE {channel} +o {sender}\r\n")
 
-                case '!botop' if hostmask in self.admin_list:
-                    # Op the bot using Chanserv
-                    self.send(f"PRIVMSG Chanserv :OP {channel} {self.nickname}\r\n")
+                    case '!deop' if hostmask in self.admin_list:
+                        # Deop the user
+                        self.send(f"MODE {channel} -o {sender}\r\n")
 
-                case '!join' if hostmask in self.admin_list:
-                    # Join a specified channel
-                    if args:
-                        new_channel = args.split()[0]
-                        self.send(f"JOIN {new_channel}\r\n")
+                    case '!botop' if hostmask in self.admin_list:
+                        # Op the bot using Chanserv
+                        self.send(f"PRIVMSG Chanserv :OP {channel} {self.nickname}\r\n")
 
-                case '!part' if hostmask in self.admin_list:
-                    # Part from a specified channel
-                    if args:
-                        part_channel = args.split()[0]
-                        self.send(f"PART {part_channel}\r\n")
+                    case '!join' if hostmask in self.admin_list:
+                        # Join a specified channel
+                        if args:
+                            new_channel = args.split()[0]
+                            self.send(f"JOIN {new_channel}\r\n")
+
+                    case '!part' if hostmask in self.admin_list:
+                        # Part from a specified channel
+                        if args:
+                            part_channel = args.split()[0]
+                            self.send(f"PART {part_channel}\r\n")
+
+    def handle_info_command(self, channel, sender):
+        response = f"Hiya! I'm Clov3r, a friendly IRC bot, {sender}! Please follow the rules: use !topic to see them."
+        self.send(f'PRIVMSG {channel} :{response}\r\n')
+        print(f"Sent: {response} to {channel}")
 
     async def dice_roll(self, args, channel, sender):
         print("Dice roll requested...")
@@ -331,22 +341,26 @@ class IRCBot:
             "d120": 120
         }
 
-        # Default to 1d20 if no arguments are provided
-        if not args:
-            args = "1d20"
-
-        # Use regular expression to parse the input
+        # Use regular expression to parse the input with custom dice notation
         match = re.match(r'(\d*)[dD](\d+)([+\-]\d+)?', args)
         if not match:
-            available_dice = ', '.join(dice_map.keys())
-            response = f"{sender}, Invalid roll format: {args}. Available dice types: {available_dice}.\r\n"
-            self.send(f'PRIVMSG {channel} :{response}\r\n')
-            return
+            # Check for custom dice notation
+            custom_match = re.match(r'(\d+)[dD](\d+)([+\-]\d+)?', args)
+            if not custom_match:
+                available_dice = ', '.join(dice_map.keys())
+                response = f"{sender}, Invalid roll format: {args}. Available dice types: {available_dice}.\r\n"
+                self.send(f'PRIVMSG {channel} :{response}\r\n')
+                return
 
-        # Extract the number of dice, the type of each die, and the modifier
-        num_dice = int(match.group(1)) if match.group(1) else 1
-        die_type = f"d{match.group(2)}"
-        modifier = int(match.group(3)) if match.group(3) else 0
+            # Extract the number of dice, the type of each die, and the modifier for custom dice
+            num_dice = int(custom_match.group(1))
+            die_type = f"d{custom_match.group(2)}"
+            modifier = int(custom_match.group(3)) if custom_match.group(3) else 0
+        else:
+            # Extract the number of dice, the type of each die, and the modifier for standard dice
+            num_dice = int(match.group(1)) if match.group(1) else 1
+            die_type = f"d{match.group(2)}"
+            modifier = int(match.group(3)) if match.group(3) else 0
 
         # Set a reasonable limit on the number of dice rolls (e.g., 1000)
         max_allowed_rolls = 10
@@ -355,10 +369,13 @@ class IRCBot:
             self.send(f'PRIVMSG {channel} :{response}\r\n')
             return
 
-        # Check if the die_type is in the predefined dice_map
-        if die_type in dice_map:
-            max_value = dice_map[die_type]
-        else:
+        # Check if the die_type is in the predefined dice_map or it's a custom die
+        max_value = dice_map.get(die_type)
+
+        if not max_value and die_type:
+            max_value = int(die_type[1:])
+
+        if not max_value:
             available_dice = ', '.join(dice_map.keys())
             response = f"{sender}, Invalid die type: {die_type}. Available dice types: {available_dice}.\r\n"
             self.send(f'PRIVMSG {channel} :{response}\r\n')
@@ -382,12 +399,15 @@ class IRCBot:
             # Parse the command: !tell username message
             _, username, message = content.split(' ', 2)
 
-            # Check if the user exists in the message_queue
-            if username not in self.message_queue:
-                self.message_queue[username] = []
+            # Create a tuple key with the channel and recipient's nickname
+            key = (channel, username)
 
-            # Save the message for the user
-            self.message_queue[username].append((username, sender, message))
+            # Check if the key exists in the message_queue
+            if key not in self.message_queue:
+                self.message_queue[key] = []
+
+            # Save the message for the user in the specific channel
+            self.message_queue[key].append((username, sender, message))
 
             # Notify the user that the message is saved
             response = f"PRIVMSG {channel} :{sender}, I'll tell {username} that when they return."
@@ -401,16 +421,17 @@ class IRCBot:
         sender = sender_match.group(1) if sender_match else "Unknown Sender"
         channel = message.split('PRIVMSG')[1].split(':')[0].strip()
 
-        # Check if there are saved messages for the current user
-        if sender in self.message_queue and self.message_queue[sender]:
+        # Check if there are saved messages for the current user in the specific channel
+        key = (channel, sender)
+        if key in self.message_queue and self.message_queue[key]:
             # Send each saved message to the user
-            for _, recipient, saved_message in self.message_queue[sender]:
+            for (_, recipient, saved_message) in self.message_queue[key]:
                 response = f"PRIVMSG {channel} :{sender}, {recipient} wanted to tell you: {saved_message}\r\n"
                 self.send(response)
                 print(f"Sent saved message to {channel}: {response}")
 
-            # Clear the saved messages for the user
-            del self.message_queue[sender]
+            # Clear the saved messages for the user in the specific channel
+            del self.message_queue[key]
 
     def send_random_mushroom_fact(self, channel):
         if self.mushroom_facts:
@@ -433,11 +454,11 @@ class IRCBot:
 
             # Iterate over the entire message history and replace matching messages
             corrected_message = None
-            for original_message_dict in reversed(self.last_messages):
-                original_sender = original_message_dict["sender"]
-                original_message = original_message_dict["content"]
+            for formatted_message in reversed(self.last_messages):
+                original_message = formatted_message["content"]
+                original_sender = formatted_message["sender"]
 
-                print(f"Checking message - Original: {original_message}, Sender: {original_sender}")
+                print(f"Checking message - Original: {original_message}")
 
                 # Handle regex flags
                 regex_flags = re.IGNORECASE if 'i' in flags else 0
@@ -445,19 +466,17 @@ class IRCBot:
                 # Set count based on the global flag
                 count = 0 if 'g' in flags else 1
 
-                # Replace old with new using regex substitution, excluding the sender's nickname
-                corrected_content = re.sub(f'(?<!{re.escape(original_sender)}){re.escape(old)}', new, original_message, flags=regex_flags, count=count)
+                # Replace old with new using regex substitution
+                corrected_message = re.sub(old, new, original_message, flags=regex_flags, count=count)
 
-                # Check if the corrected content is different from the original
-                if corrected_content != original_message:
-                    corrected_message = original_message_dict.copy()
-                    corrected_message["content"] = corrected_content
-                    print(f"Match found - Corrected: {corrected_content}")
+                # Check if the corrected message is different from the original
+                if corrected_message != original_message:
+                    print(f"Match found - Corrected: {corrected_message}")
                     break  # Stop when the first corrected message is found
 
             if corrected_message:
                 # Send the corrected message to the channel
-                response = f"PRIVMSG {channel} :[Sed] <{corrected_message['sender']}> {corrected_content}\r\n"
+                response = f"PRIVMSG {channel} :[Sed] <{original_sender}> {corrected_message}\r\n"
                 self.send(response)
                 print(f"Sent: {response} to {channel}")
             else:
