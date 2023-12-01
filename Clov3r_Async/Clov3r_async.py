@@ -111,7 +111,10 @@ class IRCBot:
         sender = sender_match.group(1) if sender_match else "Unknown Sender"
         content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
 
-        formatted_message = f"<{sender}> {content}"
+        formatted_message = {
+            "sender": sender,
+            "content": content
+        }
         self.last_messages.append(formatted_message)
 
     async def handle_messages(self):
@@ -422,39 +425,41 @@ class IRCBot:
             match = re.match(r's/(.*?)/(.*?)(?:/([gi]*))?$', content)
             if match:
                 old, new, flags = match.groups()
+                flags = flags if flags else ''  # Set flags to an empty string if not provided
             else:
                 raise ValueError("Invalid sed command format")
 
+            print(f"Processing sed command - Old: {old}, New: {new}, Flags: {flags}")
+
             # Iterate over the entire message history and replace matching messages
             corrected_message = None
-            for original_message in reversed(self.last_messages):
+            for original_message_dict in reversed(self.last_messages):
+                original_sender = original_message_dict["sender"]
+                original_message = original_message_dict["content"]
+
+                print(f"Checking message - Original: {original_message}, Sender: {original_sender}")
+
                 # Handle regex flags
                 regex_flags = re.IGNORECASE if 'i' in flags else 0
 
                 # Set count based on the global flag
                 count = 0 if 'g' in flags else 1
 
-                # Replace old with new using regex substitution
-                corrected_message = re.sub(old, new, original_message, flags=regex_flags, count=count)
+                # Replace old with new using regex substitution, excluding the sender's nickname
+                corrected_content = re.sub(f'(?<!{re.escape(original_sender)}){re.escape(old)}', new, original_message, flags=regex_flags, count=count)
 
-                # Check if the corrected message is different from the original
-                if corrected_message != original_message:
+                # Check if the corrected content is different from the original
+                if corrected_content != original_message:
+                    corrected_message = original_message_dict.copy()
+                    corrected_message["content"] = corrected_content
+                    print(f"Match found - Corrected: {corrected_content}")
                     break  # Stop when the first corrected message is found
 
             if corrected_message:
                 # Send the corrected message to the channel
-                response = f"PRIVMSG {channel} :[Sed] {corrected_message}\r\n"
+                response = f"PRIVMSG {channel} :[Sed] <{corrected_message['sender']}> {corrected_content}\r\n"
                 self.send(response)
                 print(f"Sent: {response} to {channel}")
-
-                # Apply the sed command to the message text in the message_queue
-                for recipient, saved_sender, message in self.message_queue.get(sender, []):
-                    # Use negative lookbehind to exclude the sender's nickname
-                    corrected_message = re.sub(fr"(?<!\S){re.escape(saved_sender)}{re.escape(old)}(?!\S)", new, message, flags=regex_flags, count=count)
-                    response = f"PRIVMSG {channel} :[Sed] {corrected_message}\r\n"
-                    self.send(response)
-                    print(f"Sent: {response} to {channel}")
-
             else:
                 response = f"PRIVMSG {channel} :[Sed] No matching message found to correct\r\n"
                 self.send(response)
