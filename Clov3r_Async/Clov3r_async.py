@@ -198,60 +198,55 @@ class IRCBot:
 
         for url in urls:
             try:
-                response = requests.get(url)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'html.parser')
-                title = await self.sanitize_input(soup.title.string.strip()) if soup.title else "No title found"
+                # Filter out URLs with private IP addresses
+                if self.filter_private_ip(url):
+                    print(f"Ignoring URL with private IP address: {url}")
+                    continue
 
-                # Check if the message starts with '@' symbol and contains a list of URLs
-                if content.startswith("@"):
-                    return
-                # Check if the message contains a URL
-                url_matches = re.findall(r'(https?://\S+)', content)
-                for url in url_matches:
-                    # Filter out URLs with private IP addresses
-                    if self.filter_private_ip(url):
-                        print(f"Ignoring URL with private IP address: {url}")
-                        continue
+                # Check if the URL is a raw text paste
+                if self.is_raw_text_paste(url):
+                    paste_code = url.split("/")[-1]
+                    response = f"Raw paste: {paste_code}"
+                    self.send(f'PRIVMSG {channel} :{response}\r\n')
+                    print(f"Sent: {response} to {channel}")
+                    continue
 
-                    # Check if the URL is a raw text paste
-                    if self.is_raw_text_paste(url):
-                        paste_code = url.split("/")[-1]
-                        response = f"Raw paste: {paste_code}"
-                        self.send(f'PRIVMSG {channel} :{response}\r\n')
-                        print(f"Sent: {response} to {channel}")
-                        continue
+                # Extract the full name of the file from the URL
+                file_name = url.split("/")[-1]
 
-                    # Extract the full name of the file from the URL
-                    file_name = url.split("/")[-1]
+                # Check if the URL ends with a file extension
+                if "." in file_name:
+                    file_extension = file_name.split(".")[-1].lower()
+                else:
+                    file_extension = None
 
-                    # Check if the URL ends with a file extension
-                    if "." in file_name:
-                        file_extension = file_name.split(".")[-1].lower()
+                # Check if the URL is a GitHub file URL with a line range
+                if "github.com" in url and "/blob/" in url and "#L" in url:
+                    response = f"GitHub file URL with line range"
+                else:
+                    # Extract the webpage title, sanitize it using bleach and the new function
+                    webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
+
+                    if webpage_title == "Title not found":
+                        # Handle the case where the title is not found
+                        site_name = url.split('/')[2]  # Extract the site name from the URL
+                        paste_code = url.split('/')[-1]
+                        response = f"[Website] {site_name} paste: {paste_code}"
                     else:
-                        file_extension = None
-
-                    # Check if the URL is a GitHub file URL with a line range
-                    if "github.com" in url and "/blob/" in url and "#L" in url:
-                        response = f"GitHub file URL with line range"
-                    else:
-                        # Extract the webpage title, sanitize it using bleach and the new function
-                        webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
-
                         # Process the URL based on its file extension
                         if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
-                            response = f"image file: {file_name}"
+                            response = f"[Website] image file: {file_name}"
                         elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
-                            response = f"media file: {file_name}"
+                            response = f"[Website] media file: {file_name}"
                         elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt", "pdf"]:
-                            response = f"data file: {file_name}"
+                            response = f"[Website] data file: {file_name}"
                         else:
                             # Sanitize the response before sending it to the channel
-                            response = escape(webpage_title)
+                            response = escape(f"[Website] {webpage_title}")
 
-                    # Send the response to the channel
-                    self.send(f'PRIVMSG {channel} :[Website]: {response}\r\n')
-                    print(f"Sent: {response} to {channel}")
+                # Send the response to the channel
+                self.send(f'PRIVMSG {channel} :{response}\r\n')
+                print(f"Sent: {response} to {channel}")
 
             except Exception as e:
                 print(f"Error fetching or parsing URL: {e}")
@@ -427,6 +422,12 @@ class IRCBot:
             num_dice = int(match.group(1)) if match.group(1) else 1
             die_type = f"d{match.group(2)}"
             modifier = int(match.group(3)) if match.group(3) else 0
+
+        # Check if the total number of dice doesn't exceed 9999
+        if num_dice * (dice_map.get(die_type, int(die_type[1:])) or int(die_type[1:])) > 9999:
+            response = f"{sender}, Please request a more reasonable number of dice (up to 9999).\r\n"
+            self.send(f'PRIVMSG {channel} :{response}\r\n')
+            return
 
         # Set a reasonable limit on the number of dice rolls (e.g., 1000)
         max_allowed_rolls = 10
