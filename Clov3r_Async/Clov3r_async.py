@@ -60,11 +60,15 @@ class IRCBot:
             print("Mushroom facts file not found.")
 
     def save_message_queue(self, filename="message_queue.json"):
-        # Convert tuple keys to strings for serialization
-        serialized_message_queue = {str(key): value for key, value in self.message_queue.items()}
+        try:
+            # Convert tuple keys to strings for serialization
+            serialized_message_queue = {str(key): value for key, value in self.message_queue.items()}
+            
+            with open(filename, "w") as file:
+                json.dump(serialized_message_queue, file)
         
-        with open(filename, "w") as file:
-            json.dump(serialized_message_queue, file)
+        except Exception as e:
+            print(f"Error saving message queue: {e}")
 
     def load_message_queue(self, filename="message_queue.json"):
         try:
@@ -181,13 +185,12 @@ class IRCBot:
 
     def filter_private_ip(self, url):
         # Extract the hostname from the URL
-        hostname = re.findall(r'https?://([^/]+)', url)
+        hostname = re.findall(r'https?://([^/:]+)', url)
         if hostname:
             hostname = hostname[0]
             try:
                 ip = ipaddress.ip_address(hostname)
-                if ip.is_private:
-                    return True  # URL contains a private IP address
+                return ip.is_private  # Return True for private IP addresses
             except ValueError:
                 pass  # Not an IP address
 
@@ -204,6 +207,9 @@ class IRCBot:
                 return sanitized_title.strip()
             else:
                 return "Title not found"
+        except requests.exceptions.Timeout:
+            print(f"Timeout retrieving webpage title for {url}")
+            return "Timeout retrieving title"
         except Exception as e:
             print(f"Error retrieving webpage title for {url}: {e}")
             return "Error retrieving title"
@@ -254,6 +260,15 @@ class IRCBot:
                         site_name = url.split('/')[2]  # Extract the site name from the URL
                         paste_code = url.split('/')[-1]
                         response = f"[Website] {site_name} paste: {paste_code}"
+
+                    elif webpage_title == "Timeout retrieving title":
+                        print(f"Timeout retrieving title")
+                        return
+
+                    elif webpage_title == "Error retrieving title":
+                        print(f"Error retrieving title")
+                        return
+
                     else:
                         # Process the URL based on its file extension
                         if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
@@ -269,6 +284,10 @@ class IRCBot:
                 # Send the response to the channel
                 self.send(f'PRIVMSG {channel} :{response}\r\n')
                 print(f"Sent: {response} to {channel}")
+
+            except requests.exceptions.Timeout:
+                print(f"Timeout processing URL: {url}")
+                continue
 
             except Exception as e:
                 print(f"Error fetching or parsing URL: {e}")
@@ -552,6 +571,7 @@ class IRCBot:
 
                 # Clear the saved messages for the user in the specific channel
                 del self.message_queue[key]
+                self.save_message_queue()
 
     def send_random_mushroom_fact(self, channel):
         if self.mushroom_facts:
