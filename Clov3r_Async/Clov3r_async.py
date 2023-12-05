@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import ssl
 import threading
 import time
@@ -9,6 +10,7 @@ import html
 import configparser
 import ipaddress
 import bleach
+import json
 from typing import Optional
 from bs4 import BeautifulSoup
 from html import escape
@@ -56,6 +58,23 @@ class IRCBot:
                 self.mushroom_facts = [line.strip() for line in file.readlines()]
         except FileNotFoundError:
             print("Mushroom facts file not found.")
+
+    def save_message_queue(self, filename="message_queue.json"):
+        # Convert tuple keys to strings for serialization
+        serialized_message_queue = {str(key): value for key, value in self.message_queue.items()}
+        
+        with open(filename, "w") as file:
+            json.dump(serialized_message_queue, file)
+
+    def load_message_queue(self, filename="message_queue.json"):
+        try:
+            with open(filename, "r") as file:
+                serialized_message_queue = json.load(file)
+
+                # Convert string keys back to tuples for deserialization
+                self.message_queue = {tuple(eval(key)): value for key, value in serialized_message_queue.items()}
+        except FileNotFoundError:
+            print("Message queue file not found.")
 
     async def connect(self):
         if self.use_ssl:
@@ -198,6 +217,9 @@ class IRCBot:
 
         for url in urls:
             try:
+                # Check if the message starts with '@' symbol and contains a list of URLs
+                if content.startswith("@"):
+                    return
                 # Filter out URLs with private IP addresses
                 if self.filter_private_ip(url):
                     print(f"Ignoring URL with private IP address: {url}")
@@ -381,6 +403,21 @@ class IRCBot:
                             part_channel = args.split()[0]
                             self.send(f"PART {part_channel}\r\n")
 
+                    case '!purge' if hostmask in self.admin_list:
+                        # Purge the message_queue
+                        await self.purge_command(channel, sender)
+
+    async def purge_command(self, channel, sender):
+        # Clear the message_queue
+        self.message_queue = {}
+
+        # Save the empty message_queue
+        self.save_message_queue()
+
+        response = f"PRIVMSG {channel} :{sender}, the message queue has been purged.\r\n"
+        self.send(response)
+        print(f"Sent: {response} to {channel}")
+
     def handle_info_command(self, channel, sender):
         response = f"Hiya! I'm Clov3r, a friendly IRC bot, {sender}! Please follow the rules: use !topic to see them."
         self.send(f'PRIVMSG {channel} :{response}\r\n')
@@ -466,19 +503,24 @@ class IRCBot:
             # Parse the command: !tell username message
             _, username, message = content.split(' ', 2)
 
-            # Create a tuple key with the channel and recipient's nickname
-            key = (channel, username)
+            # Convert the recipient's nickname to lowercase
+            username_lower = username.lower()
+
+            # Create a tuple key with the channel and recipient's lowercase nickname
+            key = (channel, username_lower)
 
             # Check if the key exists in the message_queue
             if key not in self.message_queue:
                 self.message_queue[key] = []
 
-            # Save the message for the user in the specific channel
-            self.message_queue[key].append((username, sender, message))
+            # Save the message for the user in the specific channel with a timestamp
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.message_queue[key].append((username, sender, message, timestamp))
 
             # Notify the user that the message is saved
             response = f"PRIVMSG {channel} :{sender}, I'll tell {username} that when they return."
             self.send(response)
+            self.save_message_queue()
         except ValueError:
             response = f"PRIVMSG {channel} :Invalid !tell command format. Use: !tell username message"
             self.send(response)
@@ -488,17 +530,28 @@ class IRCBot:
         sender = sender_match.group(1) if sender_match else "Unknown Sender"
         channel = message.split('PRIVMSG')[1].split(':')[0].strip()
 
-        # Check if there are saved messages for the current user in the specific channel
-        key = (channel, sender)
-        if key in self.message_queue and self.message_queue[key]:
-            # Send each saved message to the user
-            for (_, recipient, saved_message) in self.message_queue[key]:
-                response = f"PRIVMSG {channel} :{sender}, {recipient} wanted to tell you: {saved_message}\r\n"
-                self.send(response)
-                print(f"Sent saved message to {channel}: {response}")
+        # Iterate over keys in the message_queue and find matching recipients
+        for key, messages in list(self.message_queue.items()):
+            try:
+                (saved_channel, saved_recipient) = key
+            except ValueError:
+                print(f"Error unpacking key: {key}")
+                continue
 
-            # Clear the saved messages for the user in the specific channel
-            del self.message_queue[key]
+            # Convert the sender and recipient nicknames to lowercase for case-insensitive comparison
+            sender_lower = sender.lower()
+            recipient_lower = saved_recipient.lower()
+
+            # Check if the lowercase nicknames match and the channels are the same
+            if sender_lower == recipient_lower and channel == saved_channel:
+                # Send each saved message to the user
+                for (username, recipient, saved_message, timestamp) in messages:
+                    response = f"PRIVMSG {channel} :<{recipient}> {saved_message} at: ({timestamp})\r\n"
+                    self.send(response)
+                    print(f"Sent saved message to {channel}: {response}")
+
+                # Clear the saved messages for the user in the specific channel
+                del self.message_queue[key]
 
     def send_random_mushroom_fact(self, channel):
         if self.mushroom_facts:
@@ -573,6 +626,7 @@ class IRCBot:
     async def main_loop(self):
         try:
             self.load_mushroom_facts()
+            self.load_message_queue()
             await self.connect()
 
             # Identify with NickServ
@@ -599,6 +653,7 @@ class IRCBot:
         except KeyboardInterrupt:
             print("KeyboardInterrupt received. Shutting down...")
         finally:
+            self.save_message_queue()
             await self.disconnect()
 
     async def start(self):
