@@ -28,6 +28,7 @@ class IRCBot:
         self.last_messages = deque(maxlen=10)
         self.mushroom_facts = []
         self.message_queue = {}
+        self.last_seen = {}
         self.reader = None
         self.writer = None
         self.lock = asyncio.Lock()
@@ -51,6 +52,22 @@ class IRCBot:
             admin_list=admin_list,
             nickserv_password=nickserv_password
         )
+
+    def save_last_seen(self, filename="last_seen.json"):
+        try:
+            with open(filename, "w") as file:
+                json.dump(self.last_seen, file)
+        except Exception as e:
+            print(f"Error saving last_seen dictionary: {e}")
+
+    def load_last_seen(self, filename="last_seen.json"):
+        try:
+            with open(filename, "r") as file:
+                self.last_seen = json.load(file)
+        except FileNotFoundError:
+            print("Last_seen file not found.")
+        except Exception as e:
+            print(f"Error loading last_seen dictionary: {e}")
 
     def load_mushroom_facts(self):
         try:
@@ -153,8 +170,16 @@ class IRCBot:
             if "PING" in message:
                 self.send("PONG " + message.split()[1])
             elif "PRIVMSG" in message:
-                # Extract channel information
+                # Extract sender, channel, and content information
+                sender_match = re.match(r":(\S+)!\S+@\S+", message)
+                sender = sender_match.group(1) if sender_match else "Unknown Sender"
                 channel = message.split('PRIVMSG')[1].split(':')[0].strip()
+                content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
+
+                # Record the last seen information for the user
+                self.record_last_seen(sender, channel, content)
+                self.save_last_seen()
+
                 await self.user_commands(message)
                 await self.detect_and_parse_urls(message)
                 await self.save_message(message, channel)
@@ -162,6 +187,11 @@ class IRCBot:
 
         print("Disconnecting...")
         await self.disconnect()
+
+    def record_last_seen(self, user, channel, message_content):
+        # Update or create the last_seen dictionary for the user
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.last_seen[user.lower()] = {"timestamp": timestamp, "channel": channel, "message": message_content}
 
     async def get_channel_topic(self, channel: str) -> Optional[str]:
         self.send(f"TOPIC {channel}")
@@ -299,6 +329,7 @@ class IRCBot:
             "!roll",
             "!factoid",
             "!tell <user> <message>",
+            "!seen <user>",
             "!info",
             "!topic",
             "!moo",
@@ -392,6 +423,10 @@ class IRCBot:
                         # Handle the help command
                         await self.help_command(channel, sender)
 
+                    case '!seen':
+                        # Handle the !seen command
+                        await self.seen_command(channel, sender, content)
+
                     case '!quit' if hostmask in self.admin_list:
                         # Quits the bot from the network.
                         response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
@@ -425,6 +460,28 @@ class IRCBot:
                     case '!purge' if hostmask in self.admin_list:
                         # Purge the message_queue
                         await self.purge_command(channel, sender)
+
+    async def seen_command(self, channel, sender, content):
+        try:
+            # Parse the command: !seen username
+            _, username = content.split(' ', 1)
+
+            # Convert the username to lowercase for case-insensitive comparison
+            username_lower = username.lower()
+
+            # Check if the user has been seen before
+            if username_lower in self.last_seen:
+                last_seen_info = self.last_seen[username_lower]
+                response = f"PRIVMSG {channel} :{sender}, <{username}> {last_seen_info['message']} @ {last_seen_info['timestamp']}\r\n"
+            else:
+                response = f"PRIVMSG {channel} :{sender}, I haven't seen {username} recently.\r\n"
+
+            self.send(response)
+            print(f"Sent: {response} to {channel}")
+
+        except ValueError:
+            response = f"PRIVMSG {channel} :Invalid !seen command format. Use: !seen username\r\n"
+            self.send(response)
 
     async def purge_command(self, channel, sender):
         # Clear the message_queue
@@ -647,6 +704,7 @@ class IRCBot:
         try:
             self.load_mushroom_facts()
             self.load_message_queue()
+            self.load_last_seen()
             await self.connect()
 
             # Identify with NickServ
@@ -674,6 +732,7 @@ class IRCBot:
             print("KeyboardInterrupt received. Shutting down...")
         finally:
             self.save_message_queue()
+            self.save_last_seen()
             await self.disconnect()
 
     async def start(self):
