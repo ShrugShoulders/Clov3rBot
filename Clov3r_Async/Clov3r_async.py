@@ -7,6 +7,7 @@ import random
 import requests
 import re
 import html
+import pytz
 import configparser
 import ipaddress
 import bleach
@@ -152,8 +153,11 @@ class IRCBot:
         sender = sender_match.group(1) if sender_match else "Unknown Sender"
         content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
 
+        # Get the current time in UTC
+        utc_now = datetime.datetime.now(pytz.utc)
+
         formatted_message = {
-            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": utc_now.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "channel": channel,
             "sender": sender,
             "content": content
@@ -191,7 +195,8 @@ class IRCBot:
 
     def record_last_seen(self, user, channel, message_content):
         # Update or create the last_seen dictionary for the user
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        utc_now = datetime.datetime.now(pytz.utc)
+        timestamp = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
         self.last_seen[user.lower()] = {"timestamp": timestamp, "channel": channel, "message": message_content}
 
     async def get_channel_topic(self, channel: str) -> Optional[str]:
@@ -641,8 +646,11 @@ class IRCBot:
             if key not in self.message_queue:
                 self.message_queue[key] = []
 
+            # Get the current time in UTC
+            utc_now = datetime.datetime.now(pytz.utc)
+
             # Save the message for the user in the specific channel with a timestamp
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
             self.message_queue[key].append((username, sender, message, timestamp))
 
             # Notify the user that the message is saved
