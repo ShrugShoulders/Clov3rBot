@@ -25,7 +25,7 @@ class IRCBot:
         self.port = port
         self.use_ssl = use_ssl
         self.admin_list = set(admin_list) if admin_list else set()
-        self.last_messages = deque(maxlen=10)
+        self.last_messages = deque(maxlen=200)
         self.mushroom_facts = []
         self.message_queue = {}
         self.last_seen = {}
@@ -153,6 +153,7 @@ class IRCBot:
         content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
 
         formatted_message = {
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "channel": channel,
             "sender": sender,
             "content": content
@@ -328,6 +329,7 @@ class IRCBot:
             "!hi",
             "!roll",
             "!factoid",
+            "!last [1-10] shows last said in chan",
             "!tell <user> <message>",
             "!seen <user>",
             "!info",
@@ -427,6 +429,9 @@ class IRCBot:
                         # Handle the !seen command
                         await self.seen_command(channel, sender, content)
 
+                    case '!last':
+                        await self.last_command(channel, sender, content)
+
                     case '!quit' if hostmask in self.admin_list:
                         # Quits the bot from the network.
                         response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
@@ -460,6 +465,53 @@ class IRCBot:
                     case '!purge' if hostmask in self.admin_list:
                         # Purge the message_queue
                         await self.purge_command(channel, sender)
+
+    async def last_command(self, channel, sender, content):
+        try:
+            # Try to parse the command: !last [1-10]
+            parts = content.split(' ')
+            num_messages_str = parts[1] if len(parts) > 1 and parts[1].isdigit() else None
+
+            # Set default number of messages to 1 if not provided
+            num_messages = 1 if num_messages_str is None else min(int(num_messages_str), 10)
+
+            # Filter last messages for the specific channel
+            channel_messages = [(msg["timestamp"], msg["sender"], msg["content"]) for msg in self.last_messages if msg["channel"] == channel]
+
+            # Take the last N messages (N=num_messages)
+            last_n_messages = channel_messages[-num_messages:]
+
+            # Send the last messages to the user via direct message
+            if last_n_messages:
+                response = f"PRIVMSG {sender} :[Last {num_messages} messages in {channel}]:\r\n"
+                for timestamp, nickname, msg_content in last_n_messages:
+                    response += f"PRIVMSG {sender} :[{timestamp}] <{nickname}> {msg_content}\r\n"
+
+                # Add a delay before sending the response
+                await asyncio.sleep(0.3)
+
+                self.send(response)
+                print(f"Sent last messages to {sender} via direct message")
+            else:
+                response = f"PRIVMSG {sender} :No messages found in {channel}\r\n"
+
+                # Add a delay before sending the response
+                await asyncio.sleep(0.3)
+
+                self.send(response)
+                print(f"Sent: {response} to {sender}")
+
+        except ValueError:
+            # Handle the case where there is no valid number after !last
+            response = f"PRIVMSG {channel} :[Last 1 message in {channel}]:\r\n"
+            last_message = channel_messages[-1] if channel_messages else ("Unknown", "No messages found")
+            response += f"PRIVMSG {sender} :[{last_message[0]}] <{last_message[1]}> {last_message[2]}\r\n"
+
+            # Add a delay before sending the response
+            await asyncio.sleep(0.3)
+
+            self.send(response)
+            print(f"Sent last messages to {sender} via direct message")
 
     async def seen_command(self, channel, sender, content):
         try:
@@ -712,7 +764,6 @@ class IRCBot:
             for channel in self.channels:
                 await self.join_channel(channel)
 
-            # Rest of the existing main_loop method
             keep_alive_task = asyncio.create_task(self.keep_alive())
             handle_messages_task = asyncio.create_task(self.handle_messages())
 
