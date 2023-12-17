@@ -79,17 +79,27 @@ class IRCBot:
         except FileNotFoundError:
             print("Mushroom facts file not found.")
 
-    def save_message_queue(self, filename="message_queue.json"):
+    def save_mushroom_facts(self):
+        with open("mushroom_facts.txt", "w") as file:
+            for fact in self.mushroom_facts:
+                file.write(f"{fact}\n")
+
+    def save_message_queue(self, filename="message_queue.json", backup_filename="message_queue_backup.json"):
         try:
             # Convert tuple keys to strings for serialization
             serialized_message_queue = {str(key): value for key, value in self.message_queue.items()}
             
+            # Save the primary file
             with open(filename, "w") as file:
                 json.dump(serialized_message_queue, file)
+            
+            # Save the backup file
+            with open(backup_filename, "w") as backup_file:
+                json.dump(serialized_message_queue, backup_file)
         
         except Exception as e:
             print(f"Error saving message queue: {e}")
-
+            
     def load_message_queue(self, filename="message_queue.json"):
         try:
             with open(filename, "r") as file:
@@ -361,7 +371,7 @@ class IRCBot:
         commands = [
             "!hi",
             "!roll",
-            "!factoid",
+            "!factoid <criteria>",
             "!last [1-10] shows last said in chan",
             "!tell <user> <message>",
             "!seen <user>",
@@ -370,6 +380,7 @@ class IRCBot:
             "!moo",
             "!moof",
             "!help",
+            "!rollover",
             # Add more commands as needed
         ]
         return commands
@@ -427,8 +438,9 @@ class IRCBot:
                         await self.dice_roll(args, channel, sender)
 
                     case "!factoid":
-                        # MUSHROOM FACTS
-                        self.send_random_mushroom_fact(channel)
+                        # Extract the criteria from the user's command
+                        criteria = self.extract_factoid_criteria(args)
+                        self.send_random_mushroom_fact(channel, criteria)
 
                     case '!tell':
                         # Save a message for a user
@@ -464,6 +476,29 @@ class IRCBot:
 
                     case '!last':
                         await self.last_command(channel, sender, content)
+
+                    case '!version':
+                        version = "Clov3rBot Version 1.0"
+                        response = f"PRIVMSG {channel} :{version}"
+                        self.send(response)
+
+                    case '!rollover':
+                        # Perform the rollover action
+                        barking_action = f"PRIVMSG {channel} :woof woof!"
+                        action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
+                        self.send(barking_action)
+                        self.send(action_message)
+
+                    case '!factadd' if hostmask in self.admin_list:
+                        # Handle the !factadd command
+                        new_fact = args.strip()
+                        if new_fact:
+                            self.mushroom_facts.append(new_fact)
+                            self.save_mushroom_facts()
+                            response = f"PRIVMSG {channel} :New mushroom fact added: {new_fact}"
+                        else:
+                            response = f"PRIVMSG {channel} :Please provide a valid mushroom fact."
+                        self.send(response)
 
                     case '!quit' if hostmask in self.admin_list:
                         # Quits the bot from the network.
@@ -729,12 +764,21 @@ class IRCBot:
                 del self.message_queue[key]
                 self.save_message_queue()
 
-    def send_random_mushroom_fact(self, channel):
+    def send_random_mushroom_fact(self, channel, criteria=None):
         if self.mushroom_facts:
-            random_fact = random.choice(self.mushroom_facts)
-            self.send(f"PRIVMSG {channel} :{random_fact}\r\n")
+            filtered_facts = [fact for fact in self.mushroom_facts if criteria(fact)]
+            
+            if filtered_facts:
+                random_fact = random.choice(filtered_facts)
+                self.send(f"PRIVMSG {channel} :{random_fact}\r\n")
+                print(f"Sent mushroom fact to {channel}: {random_fact}")
+            else:
+                print("No matching mushroom facts found based on the criteria.")
 
-            print(f"Sent mushroom fact to {channel}: {random_fact}")
+    def extract_factoid_criteria(self, args):
+        # Example: !factoid parasol
+        # Extract the criteria from the user's command (e.g., "parasol")
+        return lambda fact: args.lower() in fact.lower()
 
     async def handle_sed_command(self, channel, sender, content):
         try:
