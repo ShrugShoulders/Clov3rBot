@@ -1,21 +1,21 @@
 import asyncio
+import bleach
+import configparser
 import datetime
+import html
+import ipaddress
+import json
+import pytz
+import random
+import re
+import requests
 import ssl
 import threading
 import time
-import random
-import requests
-import re
-import html
-import pytz
-import configparser
-import ipaddress
-import bleach
-import json
-from typing import Optional
 from bs4 import BeautifulSoup
-from html import escape
 from collections import deque
+from html import escape
+from typing import Optional
 
 class IRCBot:
     def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None):
@@ -65,6 +65,7 @@ class IRCBot:
         try:
             with open(filename, "r") as file:
                 self.last_seen = json.load(file)
+                print("Successfully Loaded last_seen.json")
         except FileNotFoundError:
             print("Last_seen file not found.")
         except Exception as e:
@@ -74,6 +75,7 @@ class IRCBot:
         try:
             with open("mushroom_facts.txt", "r") as file:
                 self.mushroom_facts = [line.strip() for line in file.readlines()]
+                print("Successfully Loaded Mushroom Facts")
         except FileNotFoundError:
             print("Mushroom facts file not found.")
 
@@ -95,6 +97,7 @@ class IRCBot:
 
                 # Convert string keys back to tuples for deserialization
                 self.message_queue = {tuple(eval(key)): value for key, value in serialized_message_queue.items()}
+                print("Successfully Loaded message_queue.json")
         except FileNotFoundError:
             print("Message queue file not found.")
 
@@ -139,14 +142,6 @@ class IRCBot:
                 self.send("PING :keepalive")
                 print(f"Sent: PING to Server: {self.server}")
             await asyncio.sleep(195)
-
-    async def sanitize_input(self, malicious_input):
-        decoded_input = html.unescape(malicious_input)
-        safe_output = ''.join(char for char in decoded_input if 32 <= ord(char) <= 126)
-        title_match = re.search(r'<title>(.+?)</title>', safe_output)
-        if title_match:
-            safe_output = title_match.group(1)
-        return safe_output
 
     async def save_message(self, message, channel):
         sender_match = re.match(r":(\S+)!\S+@\S+", message)
@@ -210,7 +205,15 @@ class IRCBot:
         else:
             return None
 
-    def is_raw_text_paste(self, url):
+    async def sanitize_input(self, malicious_input):
+        decoded_input = html.unescape(malicious_input)
+        safe_output = ''.join(char for char in decoded_input if 32 <= ord(char) <= 126)
+        title_match = re.search(r'<title>(.+?)</title>', safe_output)
+        if title_match:
+            safe_output = title_match.group(1)
+        return safe_output
+
+    async def is_raw_text_paste(self, url):
         # Patterns for raw text pastes
         raw_text_patterns = [
             "pastebin.com/raw/",
@@ -235,8 +238,11 @@ class IRCBot:
     async def extract_webpage_title(self, url):
         try:
             response = requests.get(url)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
+            
+            soup = BeautifulSoup(response.text, 'lxml')
             title_tag = soup.find('title')
+            
             if title_tag:
                 # Sanitize the title using bleach and filter out specific characters
                 sanitized_title = bleach.clean(str(title_tag), tags=[], attributes={})
@@ -246,9 +252,13 @@ class IRCBot:
         except requests.exceptions.Timeout:
             print(f"Timeout retrieving webpage title for {url}")
             return "Timeout retrieving title"
-        except Exception as e:
-            print(f"Error retrieving webpage title for {url}: {e}")
-            return "Error retrieving title"
+        except requests.exceptions.RequestException as e:
+            if hasattr(e, 'response') and e.response is not None and e.response.status_code == 404:
+                print(f"Webpage not found (404) for {url}")
+                return "Webpage not found"
+            else:
+                print(f"Error retrieving webpage title for {url}: {e}")
+                return "Error retrieving title"
 
     async def detect_and_parse_urls(self, message):
         sender = message.split('!')[0][1:]
@@ -262,13 +272,14 @@ class IRCBot:
                 # Check if the message starts with '@' symbol and contains a list of URLs
                 if content.startswith("@"):
                     return
+
                 # Filter out URLs with private IP addresses
                 if self.filter_private_ip(url):
                     print(f"Ignoring URL with private IP address: {url}")
                     continue
 
                 # Check if the URL is a raw text paste
-                if self.is_raw_text_paste(url):
+                if await self.is_raw_text_paste(url):
                     paste_code = url.split("/")[-1]
                     response = f"Raw paste: {paste_code}"
                     self.send(f'PRIVMSG {channel} :{response}\r\n')
@@ -288,34 +299,51 @@ class IRCBot:
                 if "github.com" in url and "/blob/" in url and "#L" in url:
                     response = f"GitHub file URL with line range"
                 else:
-                    # Extract the webpage title, sanitize it using bleach and the new function
-                    webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
-
-                    if webpage_title == "Title not found":
-                        # Handle the case where the title is not found
-                        site_name = url.split('/')[2]  # Extract the site name from the URL
-                        paste_code = url.split('/')[-1]
-                        response = f"[Website] {site_name} paste: {paste_code}"
-
-                    elif webpage_title == "Timeout retrieving title":
-                        print(f"Timeout retrieving title")
-                        return
-
-                    elif webpage_title == "Error retrieving title":
-                        print(f"Error retrieving title")
-                        return
-
+                    # Check if the URL is a Shroomery forum post
+                    if "shroomery.org/forums/showflat.php" in url:
+                        site_name = "Shroomery"
+                        post_number = url.split('/')[-1]
+                        response = f"[Forum Post] {site_name} post: {post_number}"
+                    elif "files.shroomery.org" in url:
+                        # Check if the URL is a Shroomery image
+                        site_name = "Shroomery"
+                        image_code = url.split('/')[-1]
+                        response = f"[Image] {site_name} image: {image_code}"
                     else:
-                        # Process the URL based on its file extension
-                        if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
-                            response = f"[Website] image file: {file_name}"
-                        elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
-                            response = f"[Website] media file: {file_name}"
-                        elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt", "pdf"]:
-                            response = f"[Website] data file: {file_name}"
+                        # Extract the webpage title, sanitize it using bleach and the new function
+                        webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
+
+                        if webpage_title == "Title not found":
+                            # Handle the case where the title is not found
+                            site_name = url.split('/')[2]  # Extract the site name from the URL
+                            paste_code = url.split('/')[-1]
+                            response = f"[Website] {site_name} paste: {paste_code}"
+
+                        elif webpage_title == "Timeout retrieving title":
+                            print(f"Timeout retrieving title")
+                            return
+
+                        elif webpage_title == "Error retrieving title":
+                            print(f"Error retrieving title")
+                            site_name = url.split('/')[2]  # Extract the site name from the URL
+                            paste_code = url.split('/')[-1]
+                            response = f"[Website] {site_name} paste: {paste_code}"
+
+                        elif webpage_title == "Webpage not found":
+                            print(f"Error 404 - not found")
+                            return
+
                         else:
-                            # Sanitize the response before sending it to the channel
-                            response = escape(f"[Website] {webpage_title}")
+                            # Process the URL based on its file extension
+                            if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
+                                response = f"[Website] image file: {file_name}"
+                            elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
+                                response = f"[Website] media file: {file_name}"
+                            elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt", "pdf"]:
+                                response = f"[Website] data file: {file_name}"
+                            else:
+                                # Sanitize the response before sending it to the channel
+                                response = escape(f"[Website] {webpage_title}")
 
                 # Send the response to the channel
                 self.send(f'PRIVMSG {channel} :{response}\r\n')
@@ -356,7 +384,7 @@ class IRCBot:
         print(f"Sent: {response} to {channel}")
 
     def send_dog_cow_message(self, channel):
-        dog_cow = "https://i.imgur.com/NbH0AUG.png"
+        dog_cow = "https://i.imgur.com/1S6flQw.gif"
         response = "Hello Claris, dog or cow?"
         self.send(f'PRIVMSG {channel} :{response} {dog_cow}\r\n')
 
@@ -467,9 +495,20 @@ class IRCBot:
                             part_channel = args.split()[0]
                             self.send(f"PART {part_channel}\r\n")
 
-                    case '!purge' if hostmask in self.admin_list:
-                        # Purge the message_queue
-                        await self.purge_command(channel, sender)
+                    case '!reload' if hostmask in self.admin_list:
+                        # Reload lists/dicts
+                        await self.purge_message_queue(channel, sender)
+                        await self.reload_command(channel, sender)
+
+    async def reload_command(self, channel, sender):
+        self.mushroom_facts = []
+        self.last_seen = {}
+        self.load_mushroom_facts()
+        self.load_message_queue()
+        self.load_last_seen()
+        response = f"PRIVMSG {channel} :{sender}, Clov3r Successfully Reloaded.\r\n"
+        self.send(response)
+        print(f"Sent: {response} to {channel}")
 
     async def last_command(self, channel, sender, content):
         try:
@@ -540,7 +579,7 @@ class IRCBot:
             response = f"PRIVMSG {channel} :Invalid !seen command format. Use: !seen username\r\n"
             self.send(response)
 
-    async def purge_command(self, channel, sender):
+    async def purge_message_queue(self, channel, sender):
         # Clear the message_queue
         self.message_queue = {}
 
