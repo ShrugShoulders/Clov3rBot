@@ -99,7 +99,7 @@ class IRCBot:
         
         except Exception as e:
             print(f"Error saving message queue: {e}")
-            
+
     def load_message_queue(self, filename="message_queue.json"):
         try:
             with open(filename, "r") as file:
@@ -198,11 +198,25 @@ class IRCBot:
         print("Disconnecting...")
         await self.disconnect()
 
-    def record_last_seen(self, user, channel, message_content):
-        # Update or create the last_seen dictionary for the user
+    def record_last_seen(self, sender, channel, content):
+        # Existing code for recording last seen information
         utc_now = datetime.datetime.now(pytz.utc)
         timestamp = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
-        self.last_seen[user.lower()] = {"timestamp": timestamp, "channel": channel, "message": message_content}
+
+        # Update or create the last_seen dictionary for the user and channel
+        user = sender.lower()
+
+        if user not in self.last_seen:
+            self.last_seen[user] = {}
+
+        if channel not in self.last_seen[user]:
+            self.last_seen[user][channel] = {}
+
+        self.last_seen[user][channel] = {
+            "timestamp": timestamp,
+            "message": content,
+            "chat_count": self.last_seen[user][channel].get('chat_count', 0) + 1
+        }
 
     async def get_channel_topic(self, channel: str) -> Optional[str]:
         self.send(f"TOPIC {channel}")
@@ -371,7 +385,7 @@ class IRCBot:
         commands = [
             "!hi",
             "!roll",
-            "!factoid <criteria>",
+            "!fact <criteria>",
             "!last [1-10] shows last said in chan",
             "!tell <user> <message>",
             "!seen <user>",
@@ -437,7 +451,7 @@ class IRCBot:
                         # Roll the dice
                         await self.dice_roll(args, channel, sender)
 
-                    case "!factoid":
+                    case "!fact":
                         # Extract the criteria from the user's command
                         criteria = self.extract_factoid_criteria(args)
                         self.send_random_mushroom_fact(channel, criteria)
@@ -600,12 +614,12 @@ class IRCBot:
             # Convert the username to lowercase for case-insensitive comparison
             username_lower = username.lower()
 
-            # Check if the user has been seen before
-            if username_lower in self.last_seen:
-                last_seen_info = self.last_seen[username_lower]
+            # Check if the user has been seen in the specific channel
+            if username_lower in self.last_seen and channel in self.last_seen[username_lower]:
+                last_seen_info = self.last_seen[username_lower][channel]
                 response = f"PRIVMSG {channel} :{sender}, <{username}> {last_seen_info['message']} @ {last_seen_info['timestamp']}\r\n"
             else:
-                response = f"PRIVMSG {channel} :{sender}, I haven't seen {username} recently.\r\n"
+                response = f"PRIVMSG {channel} :{sender}, I haven't seen {username} recently in {channel}.\r\n"
 
             self.send(response)
             print(f"Sent: {response} to {channel}")
@@ -776,7 +790,7 @@ class IRCBot:
                 print("No matching mushroom facts found based on the criteria.")
 
     def extract_factoid_criteria(self, args):
-        # Example: !factoid parasol
+        # Example: !fact parasol
         # Extract the criteria from the user's command (e.g., "parasol")
         return lambda fact: args.lower() in fact.lower()
 
