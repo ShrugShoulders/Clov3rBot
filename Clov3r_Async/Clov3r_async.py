@@ -261,18 +261,56 @@ class IRCBot:
 
     async def extract_webpage_title(self, url):
         try:
-            response = requests.get(url)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+
+            response = requests.get(url, headers=headers)
             response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
-            
+
+            # Check if the content type is an image
+            content_type = response.headers.get('Content-Type', '').lower()
+            if content_type.startswith('image/'):
+                return "Image URL, no title available"
+
             soup = BeautifulSoup(response.text, 'lxml')
+
+            # Look for the first <title> tag
             title_tag = soup.find('title')
-            
             if title_tag:
                 # Sanitize the title using bleach and filter out specific characters
-                sanitized_title = bleach.clean(str(title_tag), tags=[], attributes={})
+                sanitized_title = bleach.clean(str(title_tag.string), tags=[], attributes={})
                 return sanitized_title.strip()
-            else:
-                return "Title not found"
+
+            # Function to get a list of sanitized titles from meta tags
+            def get_meta_content(meta_tags):
+                titles = [bleach.clean(meta_tag.attrs.get('content', ''), tags=[], attributes={}).strip() for meta_tag in meta_tags]
+                return [title for title in titles if title]
+
+            # Look for the first og:title meta tag
+            og_title_tags = soup.find_all('meta', property='og:title')
+            if og_title_tags:
+                sanitized_titles = get_meta_content(og_title_tags)
+                if sanitized_titles:
+                    return sanitized_titles[0]
+
+            # Look for the first Twitter Card title
+            twitter_title_tags = soup.find_all('meta', name='twitter:title')
+            if twitter_title_tags:
+                sanitized_titles = get_meta_content(twitter_title_tags)
+                if sanitized_titles:
+                    return sanitized_titles[0]
+
+            # Look for the first Dublin Core title
+            dc_title_tags = soup.find_all('meta', name='DC.title')
+            if dc_title_tags:
+                sanitized_titles = get_meta_content(dc_title_tags)
+                if sanitized_titles:
+                    return sanitized_titles[0]
+
+            # If none of the above tags are found
+            return "Title not found"
+
         except requests.exceptions.Timeout:
             print(f"Timeout retrieving webpage title for {url}")
             return "Timeout retrieving title"
@@ -323,51 +361,43 @@ class IRCBot:
                 if "github.com" in url and "/blob/" in url and "#L" in url:
                     response = f"GitHub file URL with line range"
                 else:
-                    # Check if the URL is a Shroomery forum post
-                    if "shroomery.org/forums/showflat.php" in url:
-                        site_name = "Shroomery"
-                        post_number = url.split('/')[-1]
-                        response = f"[Forum Post] {site_name} post: {post_number}"
-                    elif "files.shroomery.org" in url:
-                        # Check if the URL is a Shroomery image
-                        site_name = "Shroomery"
-                        image_code = url.split('/')[-1]
-                        response = f"[Image] {site_name} image: {image_code}"
+                    # Extract the webpage title, sanitize it using bleach and the new function
+                    webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
+
+                    if webpage_title == "Title not found":
+                        # Handle the case where the title is not found
+                        site_name = url.split('/')[2]  # Extract the site name from the URL
+                        paste_code = url.split('/')[-1]
+                        response = f"[Website] {site_name} paste: {paste_code}"
+
+                    elif webpage_title == "Image URL, no title available":
+                        # Handle the case where it's an image.
+                        site_name = url.split('/')[2] 
+                        paste_code = url.split('/')[-1]
+                        response = f"[Website] {site_name} (Image) {paste_code}"
+
+                    elif webpage_title == "Timeout retrieving title":
+                        print(f"Timeout retrieving title")
+                        return
+
+                    elif webpage_title == "Error retrieving title":
+                        print(f"Error retrieving title")
+
+                    elif webpage_title == "Webpage not found":
+                        print(f"Error 404 - not found")
+                        return
+
                     else:
-                        # Extract the webpage title, sanitize it using bleach and the new function
-                        webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
-
-                        if webpage_title == "Title not found":
-                            # Handle the case where the title is not found
-                            site_name = url.split('/')[2]  # Extract the site name from the URL
-                            paste_code = url.split('/')[-1]
-                            response = f"[Website] {site_name} paste: {paste_code}"
-
-                        elif webpage_title == "Timeout retrieving title":
-                            print(f"Timeout retrieving title")
-                            return
-
-                        elif webpage_title == "Error retrieving title":
-                            print(f"Error retrieving title")
-                            site_name = url.split('/')[2]  # Extract the site name from the URL
-                            paste_code = url.split('/')[-1]
-                            response = f"[Website] {site_name} paste: {paste_code}"
-
-                        elif webpage_title == "Webpage not found":
-                            print(f"Error 404 - not found")
-                            return
-
+                        # Process the URL based on its file extension
+                        if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
+                            response = f"[Website] image file: {file_name}"
+                        elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
+                            response = f"[Website] media file: {file_name}"
+                        elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt", "pdf"]:
+                            response = f"[Website] data file: {file_name}"
                         else:
-                            # Process the URL based on its file extension
-                            if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
-                                response = f"[Website] image file: {file_name}"
-                            elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
-                                response = f"[Website] media file: {file_name}"
-                            elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt", "pdf"]:
-                                response = f"[Website] data file: {file_name}"
-                            else:
-                                # Sanitize the response before sending it to the channel
-                                response = escape(f"[Website] {webpage_title}")
+                            # Sanitize the response before sending it to the channel
+                            response = escape(f"[Website] {webpage_title}")
 
                 # Send the response to the channel
                 self.send(f'PRIVMSG {channel} :{response}\r\n')
