@@ -12,6 +12,7 @@ import requests
 import ssl
 import threading
 import time
+from PIL import Image
 from bs4 import BeautifulSoup
 from collections import deque
 from html import escape
@@ -34,6 +35,7 @@ class IRCBot:
         self.writer = None
         self.lock = asyncio.Lock()
         self.url_regex = re.compile(r'https?://\S+')
+        self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
     @classmethod
     def from_config_file(cls, config_file):
@@ -261,11 +263,7 @@ class IRCBot:
 
     async def extract_webpage_title(self, url):
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=self.headers)
             response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
 
             # Check if the content type is an image
@@ -322,6 +320,14 @@ class IRCBot:
                 print(f"Error retrieving webpage title for {url}: {e}")
                 return "Error retrieving title"
 
+    def format_file_size(self, size_in_bytes):
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_in_bytes < 1024.0:
+                return f"{size_in_bytes:.2f} {unit}"
+            size_in_bytes /= 1024.0
+
+        return f"{size_in_bytes:.2f} TB"
+
     async def detect_and_parse_urls(self, message):
         sender = message.split('!')[0][1:]
         channel = message.split('PRIVMSG')[1].split(':')[0].strip()
@@ -374,7 +380,20 @@ class IRCBot:
                         # Handle the case where it's an image.
                         site_name = url.split('/')[2] 
                         paste_code = url.split('/')[-1]
-                        response = f"[Website] {site_name} (Image) {paste_code}"
+
+                        # Get the image size
+                        try:
+                            # Fetch only the image data without downloading the entire file
+                            image_response = requests.head(url, headers=self.headers)
+                            image_size_bytes = int(image_response.headers.get('Content-Length', 0))
+
+                            # Format the image size for better readability
+                            formatted_image_size = self.format_file_size(image_size_bytes)
+                        except Exception as e:
+                            print(f"Error fetching image size: {e}")
+                            formatted_image_size = "unknown size"
+
+                        response = f"[Website] {site_name} (Image) {paste_code} - Size: {formatted_image_size}"
 
                     elif webpage_title == "Timeout retrieving title":
                         print(f"Timeout retrieving title")
@@ -382,6 +401,7 @@ class IRCBot:
 
                     elif webpage_title == "Error retrieving title":
                         print(f"Error retrieving title")
+                        return
 
                     elif webpage_title == "Webpage not found":
                         print(f"Error 404 - not found")
@@ -425,6 +445,7 @@ class IRCBot:
             "!moof",
             "!help",
             "!rollover",
+            "!stats <user>",
             # Add more commands as needed
         ]
         return commands
@@ -533,6 +554,10 @@ class IRCBot:
                         self.send(barking_action)
                         self.send(action_message)
 
+                    case '!stats':
+                        # Handle the !stats command
+                        await self.stats_command(channel, sender, content)
+
                     case '!factadd' if hostmask in self.admin_list:
                         # Handle the !factadd command
                         new_fact = args.strip()
@@ -578,6 +603,26 @@ class IRCBot:
                         # Reload lists/dicts
                         await self.purge_message_queue(channel, sender)
                         await self.reload_command(channel, sender)
+
+    async def stats_command(self, channel, sender, content):
+        # Extract the target user from the command
+        target_user = content.split()[1].strip() if len(content.split()) > 1 else None
+
+        if target_user:
+            # Convert the target user to lowercase for case-insensitive matching
+            target_user = target_user.lower()
+
+            # Check if the target user has chat count information
+            if target_user in self.last_seen and channel in self.last_seen[target_user]:
+                chat_count = self.last_seen[target_user][channel].get('chat_count', 0)
+                response = f"PRIVMSG {channel} :{sender}, I've seen {target_user} send {chat_count} messages"
+                self.send(response)
+            else:
+                response = f"PRIVMSG {channel} :{sender}, no stats found for {target_user}"
+                self.send(response)
+        else:
+            response = f"PRIVMSG {channel} :{sender}, please provide a target user for the !stats command"
+            self.send(response)
 
     async def reload_command(self, channel, sender):
         self.mushroom_facts = []
