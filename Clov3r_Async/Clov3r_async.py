@@ -1,5 +1,4 @@
 import asyncio
-import bleach
 import configparser
 import datetime
 import html
@@ -33,6 +32,7 @@ class IRCBot:
         self.last_seen = {}
         self.reader = None
         self.writer = None
+        self.last_issued_command = None
         self.lock = asyncio.Lock()
         self.url_regex = re.compile(r'https?://\S+')
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -59,7 +59,7 @@ class IRCBot:
     def save_last_seen(self, filename="last_seen.json"):
         try:
             with open(filename, "w") as file:
-                json.dump(self.last_seen, file)
+                json.dump(self.last_seen, file, indent=2)
         except Exception as e:
             print(f"Error saving last_seen dictionary: {e}")
 
@@ -93,11 +93,11 @@ class IRCBot:
             
             # Save the primary file
             with open(filename, "w") as file:
-                json.dump(serialized_message_queue, file)
+                json.dump(serialized_message_queue, file, indent=2)
             
             # Save the backup file
             with open(backup_filename, "w") as backup_file:
-                json.dump(serialized_message_queue, backup_file)
+                json.dump(serialized_message_queue, backup_file, indent=2)
         
         except Exception as e:
             print(f"Error saving message queue: {e}")
@@ -160,15 +160,25 @@ class IRCBot:
         sender = sender_match.group(1) if sender_match else "Unknown Sender"
         content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
 
-        # Get the current time in UTC
-        utc_now = datetime.datetime.now(pytz.utc)
+        # Check if it's a CTCP ACTION message
+        if "\x01ACTION" in content and content.endswith("\x01"):
+            action_content = content[len("\x01ACTION") : -len("\x01")]
+            formatted_message = {
+                "timestamp": datetime.datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "channel": channel,
+                "sender": sender.replace("<Irish>", "").strip(),
+                "content": f"* {sender} {action_content}"  # Format as an action message
+            }
+        else:
+            # Regular PRIVMSG message
+            formatted_message = {
+                "timestamp": datetime.datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "channel": channel,
+                "sender": sender,
+                "content": content
+            }
 
-        formatted_message = {
-            "timestamp": utc_now.strftime("%Y-%m-%d %H:%M:%S UTC"),
-            "channel": channel,
-            "sender": sender,
-            "content": content
-        }
+        # Append the formatted message to the last_messages dictionary
         self.last_messages.append(formatted_message)
 
     async def handle_messages(self):
@@ -176,31 +186,57 @@ class IRCBot:
         disconnect_requested = False
         while not disconnect_requested:
             data = await self.reader.read(1000)
-            message = data.decode()
-            print(message)
+            cleaned_data = self.strip_ansi_escape_sequences(data.decode(errors='replace'))
+            print(cleaned_data)
 
-            if "PING" in message:
-                self.send("PONG " + message.split()[1])
-            elif "PRIVMSG" in message:
+            if "PING" in cleaned_data:
+                self.send("PONG " + cleaned_data.split()[1])
+            elif "PRIVMSG" in cleaned_data:
                 # Extract sender, channel, and content information
-                sender_match = re.match(r":(\S+)!\S+@\S+", message)
+                sender_match = re.match(r":(\S+)!\S+@\S+", cleaned_data)
                 sender = sender_match.group(1) if sender_match else "Unknown Sender"
-                channel = message.split('PRIVMSG')[1].split(':')[0].strip()
-                content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
+                channel = cleaned_data.split('PRIVMSG')[1].split(':')[0].strip()
+                content = cleaned_data.split('PRIVMSG')[1].split(':', 1)[1].strip()
 
                 # Record the last seen information for the user
-                self.record_last_seen(sender, channel, content)
+                await self.record_last_seen(sender, channel, content)
                 self.save_last_seen()
 
-                await self.user_commands(message)
-                await self.detect_and_parse_urls(message)
-                await self.save_message(message, channel)
-                await self.send_saved_messages(message)
+                await self.user_commands(cleaned_data)
+                await self.detect_and_parse_urls(cleaned_data)
+                await self.save_message(cleaned_data, channel)
+                await self.send_saved_messages(cleaned_data)
 
         print("Disconnecting...")
         await self.disconnect()
 
-    def record_last_seen(self, sender, channel, content):
+    def strip_ansi_escape_sequences(self, text):
+        # Strip ANSI escape sequences and IRC formatting characters
+        ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
+        cleaned_text = ansi_escape.sub('', text)
+
+        # Strip IRC color codes
+        irc_color = re.compile(r'\x03\d{0,2}(,\d{1,2})?')
+        cleaned_text = irc_color.sub('', cleaned_text)
+
+        # Remove bold characters
+        bold_formatting = re.compile(r'\x02')
+        cleaned_text = bold_formatting.sub('', cleaned_text)
+
+        # Remove italics characters
+        italics_formatting = re.compile(r'\x1D')
+        cleaned_text = italics_formatting.sub('', cleaned_text)
+
+        # Remove bold-italics characters
+        bold_italics_formatting = re.compile(r'\x02\x1D|\x1D\x02')
+        cleaned_text = bold_italics_formatting.sub('', cleaned_text)
+
+        # Remove Shift Out character
+        cleaned_text = cleaned_text.replace('\x0E', '')
+
+        return cleaned_text
+
+    async def record_last_seen(self, sender, channel, content):
         # Existing code for recording last seen information
         utc_now = datetime.datetime.now(pytz.utc)
         timestamp = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -234,19 +270,7 @@ class IRCBot:
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
         safe_output = ''.join(char for char in decoded_input if 32 <= ord(char) <= 126)
-        title_match = re.search(r'<title>(.+?)</title>', safe_output)
-        if title_match:
-            safe_output = title_match.group(1)
         return safe_output
-
-    async def is_raw_text_paste(self, url):
-        # Patterns for raw text pastes
-        raw_text_patterns = [
-            "pastebin.com/raw/",
-            "bpa.st/raw/",
-            "@raw",
-        ]
-        return any(pattern in url for pattern in raw_text_patterns)
 
     def filter_private_ip(self, url):
         # Extract the hostname from the URL
@@ -266,45 +290,48 @@ class IRCBot:
             response = requests.get(url, headers=self.headers)
             response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
 
-            # Check if the content type is an image
+            # Check if the content type is an image or plain text
             content_type = response.headers.get('Content-Type', '').lower()
             if content_type.startswith('image/'):
                 return "Image URL, no title available"
+            elif content_type.startswith('text/plain'):
+                # Handle plain text file
+                return "Plain text file"
 
             soup = BeautifulSoup(response.text, 'lxml')
 
-            # Look for the first <title> tag
-            title_tag = soup.find('title')
-            if title_tag:
-                # Sanitize the title using bleach and filter out specific characters
-                sanitized_title = bleach.clean(str(title_tag.string), tags=[], attributes={})
-                return sanitized_title.strip()
-
             # Function to get a list of sanitized titles from meta tags
-            def get_meta_content(meta_tags):
-                titles = [bleach.clean(meta_tag.attrs.get('content', ''), tags=[], attributes={}).strip() for meta_tag in meta_tags]
-                return [title for title in titles if title]
+            def get_meta_content(title_tag, meta_tags):
+                # Extract title from title tag
+                title_from_title_tag = title_tag.text if title_tag else None
 
-            # Look for the first og:title meta tag
-            og_title_tags = soup.find_all('meta', property='og:title')
-            if og_title_tags:
-                sanitized_titles = get_meta_content(og_title_tags)
-                if sanitized_titles:
-                    return sanitized_titles[0]
+                # Extract titles from meta tags
+                titles_from_meta_tags = [meta_tag.attrs.get('content', '').strip() for meta_tag in meta_tags]
 
-            # Look for the first Twitter Card title
-            twitter_title_tags = soup.find_all('meta', name='twitter:title')
-            if twitter_title_tags:
-                sanitized_titles = get_meta_content(twitter_title_tags)
-                if sanitized_titles:
-                    return sanitized_titles[0]
+                # Combine and prioritize titles
+                all_titles = [title_from_title_tag] + [title for title in titles_from_meta_tags if title]
 
-            # Look for the first Dublin Core title
-            dc_title_tags = soup.find_all('meta', name='DC.title')
-            if dc_title_tags:
-                sanitized_titles = get_meta_content(dc_title_tags)
-                if sanitized_titles:
-                    return sanitized_titles[0]
+                return all_titles
+
+            # Look for the first og:title meta tag, Twitter Card title, Dublin Core title,
+            # meta tag with name attribute set to "title", and the title tag directly in the head
+            og_title_tags = soup.find_all('meta', {'property': 'og:title'})
+            twitter_title_tags = soup.find_all('meta', {'name': 'twitter:title'})
+            dc_title_tags = soup.find_all('meta', {'name': 'DC.title'})
+            meta_name_title_tags = soup.find_all('meta', {'name': 'title'})
+            title_tag = soup.head.title
+
+            # Combine all meta tags
+            all_meta_tags = og_title_tags + twitter_title_tags + dc_title_tags + meta_name_title_tags
+
+            # Get all titles from title tag and meta tags
+            all_titles = get_meta_content(title_tag, all_meta_tags)
+
+            if all_titles:
+                sanitized_titles = [html.unescape(title) for title in all_titles]
+                title = sanitized_titles[0]
+                print(f"Extracted title from meta tags and title tag: {title}")
+                return title
 
             # If none of the above tags are found
             return "Title not found"
@@ -346,29 +373,25 @@ class IRCBot:
                     print(f"Ignoring URL with private IP address: {url}")
                     continue
 
-                # Check if the URL is a raw text paste
-                if await self.is_raw_text_paste(url):
-                    paste_code = url.split("/")[-1]
-                    response = f"Raw paste: {paste_code}"
-                    self.send(f'PRIVMSG {channel} :{response}\r\n')
-                    print(f"Sent: {response} to {channel}")
-                    continue
+                # Check if the URL is an Amazon link
+                if 'amazon.com' in url:
+                    # Extract relevant information from the Amazon link
+                    product_name = " ".join(url.split('/')[3].split('-')).title()  # Extract product name from URL
+                    response = f"[Amazon] Product: {product_name}"
 
-                # Extract the full name of the file from the URL
-                file_name = url.split("/")[-1]
-
-                # Check if the URL ends with a file extension
-                if "." in file_name:
-                    file_extension = file_name.split(".")[-1].lower()
                 else:
-                    file_extension = None
+                    # Extract the full name of the file from the URL
+                    file_name = url.split("/")[-1]
 
-                # Check if the URL is a GitHub file URL with a line range
-                if "github.com" in url and "/blob/" in url and "#L" in url:
-                    response = f"GitHub file URL with line range"
-                else:
-                    # Extract the webpage title, sanitize it using bleach and the new function
+                    # Check if the URL ends with a file extension
+                    if "." in file_name:
+                        file_extension = file_name.split(".")[-1].lower()
+                    else:
+                        file_extension = None
+
+                    # Extract the webpage title.
                     webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
+                    print(f"webpage_title: {webpage_title}")
 
                     if webpage_title == "Title not found":
                         # Handle the case where the title is not found
@@ -394,6 +417,23 @@ class IRCBot:
                             formatted_image_size = "unknown size"
 
                         response = f"[Website] {site_name} (Image) {paste_code} - Size: {formatted_image_size}"
+
+                    elif webpage_title == "Plain text file":
+                        # Handle the case where it's a plain text file.
+                        site_name = url.split('/')[2]
+                        paste_code = url.split('/')[-1]
+
+                        # Get the text file size using a GET request
+                        try:
+                            text_response = requests.get(url, headers=self.headers)
+                            text_size_bytes = len(text_response.content)
+
+                            formatted_text_size = self.format_file_size(text_size_bytes)
+                        except Exception as e:
+                            print(f"Error fetching text file size: {e}")
+                            formatted_text_size = "unknown size"
+
+                        response = f"[Website] {site_name} (Text) {paste_code} - Size: {formatted_text_size}"
 
                     elif webpage_title == "Timeout retrieving title":
                         print(f"Timeout retrieving title")
@@ -433,19 +473,19 @@ class IRCBot:
     def get_available_commands(self):
         # List all available commands (excluding admin commands)
         commands = [
-            "!hi",
-            "!roll",
-            "!fact <criteria>",
-            "!last [1-10] shows last said in chan",
-            "!tell <user> <message>",
-            "!seen <user>",
-            "!info",
-            "!topic",
-            "!moo",
-            "!moof",
-            "!help",
-            "!rollover",
-            "!stats <user>",
+            ".ping",
+            ".roll",
+            ".fact <criteria>",
+            ".last [1-10] shows last said in chan",
+            ".tell <user> <message>",
+            ".seen <user>",
+            ".info",
+            ".topic",
+            ".moo",
+            ".moof",
+            ".help",
+            ".rollover",
+            ".stats <user>",
             # Add more commands as needed
         ]
         return commands
@@ -493,35 +533,35 @@ class IRCBot:
                 args = content[len(command):].strip()
 
                 match command:
-                    case '!hi':
+                    case '.ping':
                         # Says hi (like ping)
-                        response = f"PRIVMSG {channel} :Hi {sender}!"
+                        response = f"PRIVMSG {channel} :{sender}: PNOG!"
                         self.send(response)
 
-                    case '!roll':
+                    case '.roll':
                         # Roll the dice
                         await self.dice_roll(args, channel, sender)
 
-                    case "!fact":
+                    case '.fact':
                         # Extract the criteria from the user's command
                         criteria = self.extract_factoid_criteria(args)
                         self.send_random_mushroom_fact(channel, criteria)
 
-                    case '!tell':
+                    case '.tell':
                         # Save a message for a user
                         await self.handle_tell_command(channel, sender, content)
 
-                    case '!info':
+                    case '.info':
                         self.handle_info_command(channel, sender)
 
-                    case '!moo':
+                    case '.moo':
                         response = "Hi cow!"
                         self.send(f'PRIVMSG {channel} :{response}\r\n')
 
-                    case '!moof':
+                    case '.moof':
                         self.send_dog_cow_message(channel)
 
-                    case '!topic':
+                    case '.topic':
                         # Get and send the channel topic
                         topic = await self.get_channel_topic(channel)
                         if topic:
@@ -531,34 +571,34 @@ class IRCBot:
                         self.send(response)
                         print(f"Sent: {response} to {channel}")
 
-                    case '!help':
+                    case '.help':
                         # Handle the help command
                         await self.help_command(channel, sender)
 
-                    case '!seen':
+                    case '.seen':
                         # Handle the !seen command
                         await self.seen_command(channel, sender, content)
 
-                    case '!last':
+                    case '.last':
                         await self.last_command(channel, sender, content)
 
-                    case '!version':
+                    case '.version':
                         version = "Clov3rBot Version 1.0"
                         response = f"PRIVMSG {channel} :{version}"
                         self.send(response)
 
-                    case '!rollover':
+                    case '.rollover':
                         # Perform the rollover action
                         barking_action = f"PRIVMSG {channel} :woof woof!"
                         action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
                         self.send(barking_action)
                         self.send(action_message)
 
-                    case '!stats':
+                    case '.stats':
                         # Handle the !stats command
                         await self.stats_command(channel, sender, content)
 
-                    case '!factadd' if hostmask in self.admin_list:
+                    case '.factadd' if hostmask in self.admin_list:
                         # Handle the !factadd command
                         new_fact = args.strip()
                         if new_fact:
@@ -569,37 +609,37 @@ class IRCBot:
                             response = f"PRIVMSG {channel} :Please provide a valid mushroom fact."
                         self.send(response)
 
-                    case '!quit' if hostmask in self.admin_list:
+                    case '.quit' if hostmask in self.admin_list:
                         # Quits the bot from the network.
                         response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
                         self.send(response)
                         disconnect_requested = True
 
-                    case '!op' if hostmask in self.admin_list:
+                    case '.op' if hostmask in self.admin_list:
                         # Op the user
                         self.send(f"MODE {channel} +o {sender}\r\n")
 
-                    case '!deop' if hostmask in self.admin_list:
+                    case '.deop' if hostmask in self.admin_list:
                         # Deop the user
                         self.send(f"MODE {channel} -o {sender}\r\n")
 
-                    case '!botop' if hostmask in self.admin_list:
+                    case '.botop' if hostmask in self.admin_list:
                         # Op the bot using Chanserv
                         self.send(f"PRIVMSG Chanserv :OP {channel} {self.nickname}\r\n")
 
-                    case '!join' if hostmask in self.admin_list:
+                    case '.join' if hostmask in self.admin_list:
                         # Join a specified channel
                         if args:
                             new_channel = args.split()[0]
                             self.send(f"JOIN {new_channel}\r\n")
 
-                    case '!part' if hostmask in self.admin_list:
+                    case '.part' if hostmask in self.admin_list:
                         # Part from a specified channel
                         if args:
                             part_channel = args.split()[0]
                             self.send(f"PART {part_channel}\r\n")
 
-                    case '!reload' if hostmask in self.admin_list:
+                    case '.reload' if hostmask in self.admin_list:
                         # Reload lists/dicts
                         await self.purge_message_queue(channel, sender)
                         await self.reload_command(channel, sender)
@@ -621,7 +661,7 @@ class IRCBot:
                 response = f"PRIVMSG {channel} :{sender}, no stats found for {target_user}"
                 self.send(response)
         else:
-            response = f"PRIVMSG {channel} :{sender}, please provide a target user for the !stats command"
+            response = f"PRIVMSG {channel} :{sender}, please provide a target user for the .stats command"
             self.send(response)
 
     async def reload_command(self, channel, sender):
@@ -715,7 +755,7 @@ class IRCBot:
         print(f"Sent: {response} to {channel}")
 
     def handle_info_command(self, channel, sender):
-        response = f"Hiya! I'm Clov3r, a friendly IRC bot, {sender}! Please follow the rules: use !topic to see them."
+        response = f"Hiya! I'm Clov3r, a friendly IRC bot, {sender}! Please follow the rules: use .topic to see them."
         self.send(f'PRIVMSG {channel} :{response}\r\n')
         print(f"Sent: {response} to {channel}")
 
@@ -824,6 +864,12 @@ class IRCBot:
             response = f"PRIVMSG {channel} :Invalid !tell command format. Use: !tell username message"
             self.send(response)
 
+    def format_timedelta(self, delta):
+        days, seconds = delta.days, delta.seconds
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{days}d {hours}h {minutes}m {seconds}s"
+
     async def send_saved_messages(self, message):
         sender_match = re.match(r":(\S+)!\S+@\S+", message)
         sender = sender_match.group(1) if sender_match else "Unknown Sender"
@@ -843,9 +889,21 @@ class IRCBot:
 
             # Check if the lowercase nicknames match and the channels are the same
             if sender_lower == recipient_lower and channel == saved_channel:
-                # Send each saved message to the user
+                # Get the current time
+                current_time = datetime.datetime.utcnow()
+
+                # Calculate the time difference once outside the loop
                 for (username, recipient, saved_message, timestamp) in messages:
-                    response = f"PRIVMSG {channel} :<{recipient}> {saved_message} at: ({timestamp})\r\n"
+                    # Convert the timestamp to a datetime object
+                    message_time = datetime.datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S %Z')
+
+                    # Calculate the time difference
+                    time_difference = current_time - message_time
+
+                    # Format the time difference as a human-readable string
+                    formatted_time_difference = self.format_timedelta(time_difference)
+
+                    response = f"PRIVMSG {channel} :{sender}, {formatted_time_difference} ago <{recipient}> {saved_message} \r\n"
                     self.send(response)
                     print(f"Sent saved message to {channel}: {response}")
 
