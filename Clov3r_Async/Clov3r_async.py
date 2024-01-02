@@ -18,8 +18,9 @@ from html import escape
 from typing import Optional
 
 class IRCBot:
-    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None):
+    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None,channels_features=None):
         self.nickname = nickname
+        self.channels_features = channels_features
         self.channels = channels if isinstance(channels, list) else [channels]
         self.nickserv_password = nickserv_password
         self.server = server
@@ -38,7 +39,11 @@ class IRCBot:
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
     @classmethod
-    def from_config_file(cls, config_file):
+    def from_config_file(cls, config_file, features_file='channels_features.json'):
+        # Load features from the JSON file
+        with open(features_file, 'r') as f:
+            channels_features = json.load(f)
+
         config = configparser.ConfigParser()
         config.read(config_file)
         bot_config = config['BotConfig']
@@ -48,6 +53,7 @@ class IRCBot:
 
         return cls(
             nickname=bot_config.get('nickname'),
+            channels_features=channels_features,
             channels=channels,
             server=bot_config.get('server'),
             port=int(bot_config.get('port', 6697)),
@@ -55,6 +61,12 @@ class IRCBot:
             admin_list=admin_list,
             nickserv_password=nickserv_password
         )
+
+    async def handle_channel_features(self, channel, command):
+        # Check if the specified channel has the given feature enabled
+        if channel in self.channels_features and command in self.channels_features[channel]:
+            return True
+        return False
 
     def save_last_seen(self, filename="last_seen.json"):
         try:
@@ -80,6 +92,17 @@ class IRCBot:
                 print("Successfully Loaded Mushroom Facts")
         except FileNotFoundError:
             print("Mushroom facts file not found.")
+
+    def load_channel_features(self, filename="channels_features.json"):
+        # Load features from the JSON file
+        try:
+            with open(filename, 'r') as f:
+                self.channels_features = json.load(f)
+            print("Successfully Loaded Channel Features")
+        except FileNotFoundError:
+            print(f"{filename} file not found.")
+        except Exception as e:
+            print(f"Error loading channel features: {e}")
 
     def save_mushroom_facts(self):
         with open("mushroom_facts.txt", "w") as file:
@@ -161,14 +184,16 @@ class IRCBot:
         content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
 
         # Check if it's a CTCP ACTION message
-        if "\x01ACTION" in content and content.endswith("\x01"):
+        if content.startswith("\x01ACTION") and content.endswith("\x01"):
+            # If it's an action message, extract the content without the triggers
             action_content = content[len("\x01ACTION") : -len("\x01")]
             formatted_message = {
                 "timestamp": datetime.datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "channel": channel,
-                "sender": sender.replace("<Irish>", "").strip(),
-                "content": f"* {sender} {action_content}"  # Format as an action message
+                "sender": sender,
+                "content": f"* {sender}{action_content}"  # Format as an action message
             }
+            print(f"Formatted Action Message: {formatted_message}")
         else:
             # Regular PRIVMSG message
             formatted_message = {
@@ -203,7 +228,8 @@ class IRCBot:
                 self.save_last_seen()
 
                 await self.user_commands(cleaned_data)
-                await self.detect_and_parse_urls(cleaned_data)
+                if await self.handle_channel_features(channel, '.urlparse'):
+                    await self.detect_and_parse_urls(cleaned_data)
                 await self.save_message(cleaned_data, channel)
                 await self.send_saved_messages(cleaned_data)
 
@@ -456,8 +482,7 @@ class IRCBot:
                         elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt", "pdf"]:
                             response = f"[Website] data file: {file_name}"
                         else:
-                            # Sanitize the response before sending it to the channel
-                            response = escape(f"[Website] {webpage_title}")
+                            response = f"[Website] {webpage_title}"
 
                 # Send the response to the channel
                 self.send(f'PRIVMSG {channel} :{response}\r\n')
@@ -486,7 +511,6 @@ class IRCBot:
             ".help",
             ".rollover",
             ".stats <user>",
-            # Add more commands as needed
         ]
         return commands
 
@@ -525,124 +549,128 @@ class IRCBot:
 
         # Check if the message starts with 's/' for sed-like command
         if content and content.startswith('s/'):
-            await self.handle_sed_command(channel, sender, content)
+            if await self.handle_channel_features(channel, '.sed'):
+                await self.handle_sed_command(channel, sender, content)
         else:
             # Check if there are any words in the content before accessing the first word
             if content:
                 command = content.split()[0]
                 args = content[len(command):].strip()
 
-                match command:
-                    case '.ping':
-                        # Says hi (like ping)
-                        response = f"PRIVMSG {channel} :{sender}: PNOG!"
-                        self.send(response)
+                if await self.handle_channel_features(channel, command):
+                    match command:
+                        case '.ping':
+                            # Says hi (like ping)
+                            response = f"PRIVMSG {channel} :{sender}: PNOG!"
+                            self.send(response)
 
-                    case '.roll':
-                        # Roll the dice
-                        await self.dice_roll(args, channel, sender)
+                        case '.roll':
+                            # Roll the dice
+                            await self.dice_roll(args, channel, sender)
 
-                    case '.fact':
-                        # Extract the criteria from the user's command
-                        criteria = self.extract_factoid_criteria(args)
-                        self.send_random_mushroom_fact(channel, criteria)
+                        case '.fact':
+                            # Extract the criteria from the user's command
+                            criteria = self.extract_factoid_criteria(args)
+                            self.send_random_mushroom_fact(channel, criteria)
 
-                    case '.tell':
-                        # Save a message for a user
-                        await self.handle_tell_command(channel, sender, content)
+                        case '.tell':
+                            # Save a message for a user
+                            await self.handle_tell_command(channel, sender, content)
 
-                    case '.info':
-                        self.handle_info_command(channel, sender)
+                        case '.info':
+                            self.handle_info_command(channel, sender)
 
-                    case '.moo':
-                        response = "Hi cow!"
-                        self.send(f'PRIVMSG {channel} :{response}\r\n')
+                        case '.moo':
+                            response = "Hi cow!"
+                            self.send(f'PRIVMSG {channel} :{response}\r\n')
 
-                    case '.moof':
-                        self.send_dog_cow_message(channel)
+                        case '.moof':
+                            self.send_dog_cow_message(channel)
 
-                    case '.topic':
-                        # Get and send the channel topic
-                        topic = await self.get_channel_topic(channel)
-                        if topic:
-                            response = f"PRIVMSG {channel} :{topic}\r\n"
-                        else:
-                            response = f"PRIVMSG {channel} :Unable to retrieve the topic\r\n"
-                        self.send(response)
-                        print(f"Sent: {response} to {channel}")
+                        case '.topic':
+                            # Get and send the channel topic
+                            topic = await self.get_channel_topic(channel)
+                            if topic:
+                                response = f"PRIVMSG {channel} :{topic}\r\n"
+                            else:
+                                response = f"PRIVMSG {channel} :Unable to retrieve the topic\r\n"
+                            self.send(response)
+                            print(f"Sent: {response} to {channel}")
 
-                    case '.help':
-                        # Handle the help command
-                        await self.help_command(channel, sender)
+                        case '.help':
+                            # Handle the help command
+                            await self.help_command(channel, sender)
 
-                    case '.seen':
-                        # Handle the !seen command
-                        await self.seen_command(channel, sender, content)
+                        case '.seen':
+                            # Handle the !seen command
+                            await self.seen_command(channel, sender, content)
 
-                    case '.last':
-                        await self.last_command(channel, sender, content)
+                        case '.last':
+                            await self.last_command(channel, sender, content)
 
-                    case '.version':
-                        version = "Clov3rBot Version 1.0"
-                        response = f"PRIVMSG {channel} :{version}"
-                        self.send(response)
+                        case '.version':
+                            version = "Clov3rBot Version 1.2"
+                            response = f"PRIVMSG {channel} :{version}"
+                            self.send(response)
 
-                    case '.rollover':
-                        # Perform the rollover action
-                        barking_action = f"PRIVMSG {channel} :woof woof!"
-                        action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
-                        self.send(barking_action)
-                        self.send(action_message)
+                        case '.rollover':
+                            # Perform the rollover action
+                            barking_action = f"PRIVMSG {channel} :woof woof!"
+                            action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
+                            self.send(barking_action)
+                            self.send(action_message)
 
-                    case '.stats':
-                        # Handle the !stats command
-                        await self.stats_command(channel, sender, content)
+                        case '.stats':
+                            # Handle the !stats command
+                            await self.stats_command(channel, sender, content)
 
-                    case '.factadd' if hostmask in self.admin_list:
-                        # Handle the !factadd command
-                        new_fact = args.strip()
-                        if new_fact:
-                            self.mushroom_facts.append(new_fact)
-                            self.save_mushroom_facts()
-                            response = f"PRIVMSG {channel} :New mushroom fact added: {new_fact}"
-                        else:
-                            response = f"PRIVMSG {channel} :Please provide a valid mushroom fact."
-                        self.send(response)
+                        case '.factadd' if hostmask in self.admin_list:
+                            # Handle the !factadd command
+                            new_fact = args.strip()
+                            if new_fact:
+                                self.mushroom_facts.append(new_fact)
+                                self.save_mushroom_facts()
+                                response = f"PRIVMSG {channel} :New mushroom fact added: {new_fact}"
+                            else:
+                                response = f"PRIVMSG {channel} :Please provide a valid mushroom fact."
+                            self.send(response)
 
-                    case '.quit' if hostmask in self.admin_list:
-                        # Quits the bot from the network.
-                        response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
-                        self.send(response)
-                        disconnect_requested = True
+                        case '.quit' if hostmask in self.admin_list:
+                            # Quits the bot from the network.
+                            response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
+                            self.send(response)
+                            disconnect_requested = True
 
-                    case '.op' if hostmask in self.admin_list:
-                        # Op the user
-                        self.send(f"MODE {channel} +o {sender}\r\n")
+                        case '.op' if hostmask in self.admin_list:
+                            # Op the user
+                            self.send(f"MODE {channel} +o {sender}\r\n")
 
-                    case '.deop' if hostmask in self.admin_list:
-                        # Deop the user
-                        self.send(f"MODE {channel} -o {sender}\r\n")
+                        case '.deop' if hostmask in self.admin_list:
+                            # Deop the user
+                            self.send(f"MODE {channel} -o {sender}\r\n")
 
-                    case '.botop' if hostmask in self.admin_list:
-                        # Op the bot using Chanserv
-                        self.send(f"PRIVMSG Chanserv :OP {channel} {self.nickname}\r\n")
+                        case '.botop' if hostmask in self.admin_list:
+                            # Op the bot using Chanserv
+                            self.send(f"PRIVMSG Chanserv :OP {channel} {self.nickname}\r\n")
 
-                    case '.join' if hostmask in self.admin_list:
-                        # Join a specified channel
-                        if args:
-                            new_channel = args.split()[0]
-                            self.send(f"JOIN {new_channel}\r\n")
+                        case '.join' if hostmask in self.admin_list:
+                            # Join a specified channel
+                            if args:
+                                new_channel = args.split()[0]
+                                self.send(f"JOIN {new_channel}\r\n")
 
-                    case '.part' if hostmask in self.admin_list:
-                        # Part from a specified channel
-                        if args:
-                            part_channel = args.split()[0]
-                            self.send(f"PART {part_channel}\r\n")
+                        case '.part' if hostmask in self.admin_list:
+                            # Part from a specified channel
+                            if args:
+                                part_channel = args.split()[0]
+                                self.send(f"PART {part_channel}\r\n")
 
-                    case '.reload' if hostmask in self.admin_list:
-                        # Reload lists/dicts
-                        await self.purge_message_queue(channel, sender)
-                        await self.reload_command(channel, sender)
+                        case '.reload' if hostmask in self.admin_list:
+                            # Reload lists/dicts
+                            await self.purge_message_queue(channel, sender)
+                            await self.reload_command(channel, sender)
+                else:
+                    print(f"Feature {command} not enabled or recognized.")
 
     async def stats_command(self, channel, sender, content):
         # Extract the target user from the command
@@ -665,8 +693,10 @@ class IRCBot:
             self.send(response)
 
     async def reload_command(self, channel, sender):
+        self.channels_features = {}
         self.mushroom_facts = []
         self.last_seen = {}
+        self.load_channel_features()
         self.load_mushroom_facts()
         self.load_message_queue()
         self.load_last_seen()
@@ -967,8 +997,14 @@ class IRCBot:
 
             # Check if a match was found
             if corrected_message is not None:
-                # Send the corrected message to the channel
-                response = f"PRIVMSG {channel} :[Sed] <{original_sender}> {corrected_message}\r\n"
+                # Check if it's an action message (indicated by an asterisk at the beginning)
+                if original_message.startswith("*"):
+                    # If it's an action message, send the corrected message without the original sender
+                    response = f"PRIVMSG {channel} :[Sed] {corrected_message}\r\n"
+                else:
+                    # If it's a regular message, send the corrected message with the original sender
+                    response = f"PRIVMSG {channel} :[Sed] <{original_sender}> {corrected_message}\r\n"
+
                 self.send(response)
                 print(f"Sent: {response} to {channel}")
             else:
