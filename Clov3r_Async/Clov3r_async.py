@@ -193,7 +193,6 @@ class IRCBot:
                 "sender": sender,
                 "content": f"* {sender}{action_content}"  # Format as an action message
             }
-            print(f"Formatted Action Message: {formatted_message}")
         else:
             # Regular PRIVMSG message
             formatted_message = {
@@ -224,12 +223,16 @@ class IRCBot:
                 content = cleaned_data.split('PRIVMSG')[1].split(':', 1)[1].strip()
 
                 # Record the last seen information for the user
-                await self.record_last_seen(sender, channel, content)
-                self.save_last_seen()
+                if await self.handle_channel_features(channel, '.record'):
+                    await self.record_last_seen(sender, channel, content)
+                    self.save_last_seen()
 
-                await self.user_commands(cleaned_data)
+                if await self.handle_channel_features(channel, '.usercommands'):
+                    await self.user_commands(cleaned_data)
+
                 if await self.handle_channel_features(channel, '.urlparse'):
                     await self.detect_and_parse_urls(cleaned_data)
+
                 await self.save_message(cleaned_data, channel)
                 await self.send_saved_messages(cleaned_data)
 
@@ -500,26 +503,64 @@ class IRCBot:
         commands = [
             ".ping",
             ".roll",
-            ".fact <criteria>",
-            ".last [1-10] shows last said in chan",
-            ".tell <user> <message>",
-            ".seen <user>",
+            ".fact",
+            ".last",
+            ".tell",
+            ".seen",
             ".info",
             ".topic",
             ".moo",
             ".moof",
             ".help",
             ".rollover",
-            ".stats <user>",
+            ".stats",
+            ".version",
         ]
         return commands
 
-    async def help_command(self, channel, sender):
-        # Get the list of available commands
-        commands = self.get_available_commands()
+    def get_detailed_help(self, command):
+        # Provide detailed help for specific commands
+        help_dict = {
+            ".ping": "Ping command: Check if the bot is responsive.",
+            ".roll": "Roll command: Roll a specific die (1d20) Roll multiple dice (4d20) Example: .roll 2d20+4 Available modifiers: +",
+            ".fact": "Fact command: Display a random mushroom fact. Use '.fact <criteria>' to filter facts.",
+            ".last": "Last command: Display the last messages in the channel. Use '.last [1-10]' for specific messages.",
+            ".tell": "Tell command: Save a message for a user. Use '.tell <user> <message>'.",
+            ".seen": "Seen command: Check when a user was last seen. Use '.seen <user>'.",
+            ".info": "Info command: Display information about the bot.",
+            ".topic": "Topic command: Display the current channel topic.",
+            ".moo": "Moo command: Greet the cow.",
+            ".moof": "Moof command: The dogcow, named Clarus, is a bitmapped image designed by Susan Kare for the demonstration of page layout in the classic Mac OS.",
+            ".help": "Help command: Display a list of available commands. Use '.help <command>' for detailed help.",
+            ".rollover": "Rollover command: Woof woof!",
+            ".stats": "Stats command: Display statistics for a user. Use '.stats <user>'.",
+            ".version": "Version command: Shows the version of Clov3r",
+        }
 
-        # Send the list of commands to the channel
-        response = f"PRIVMSG {channel} :{sender}, Commands: {', '.join(commands)}\r\n"
+        return help_dict.get(command, f"No detailed help available for {command}.")
+
+    async def help_command(self, channel, sender, args=None):
+        # Get the list of available commands
+        available_commands = self.get_available_commands()
+
+        if args:
+            # Remove the leading period (.) if present
+            specific_command = args.split()[0].lstrip('.')
+
+            # Check if the specific_command is a prefix of any command in available_commands
+            matching_commands = [cmd for cmd in available_commands if cmd[1:] == specific_command]
+
+            if matching_commands:
+                # Provide detailed help for the specific command
+                detailed_help = self.get_detailed_help(matching_commands[0])  # Assuming the first match
+                response = f"PRIVMSG {channel} :{sender}, {detailed_help}\r\n"
+            else:
+                response = f"PRIVMSG {channel} :{sender}, Unknown command: {specific_command}\r\n"
+        else:
+            # Provide an overview of available commands
+            response = f"PRIVMSG {channel} :{sender}, Commands: {', '.join(available_commands)} Use: .help <command> for more info.\r\n"
+
+        # Send the response to the channel
         self.send(response)
         print(f"Sent: {response} to {channel}")
 
@@ -560,7 +601,7 @@ class IRCBot:
                 if await self.handle_channel_features(channel, command):
                     match command:
                         case '.ping':
-                            # Says hi (like ping)
+                            # PNOG
                             response = f"PRIVMSG {channel} :{sender}: PNOG!"
                             self.send(response)
 
@@ -599,7 +640,7 @@ class IRCBot:
 
                         case '.help':
                             # Handle the help command
-                            await self.help_command(channel, sender)
+                            await self.help_command(channel, sender, args)
 
                         case '.seen':
                             # Handle the !seen command
