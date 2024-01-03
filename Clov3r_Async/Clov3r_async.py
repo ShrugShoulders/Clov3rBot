@@ -267,8 +267,7 @@ class IRCBot:
 
     async def record_last_seen(self, sender, channel, content):
         # Existing code for recording last seen information
-        utc_now = datetime.datetime.now(pytz.utc)
-        timestamp = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Update or create the last_seen dictionary for the user and channel
         user = sender.lower()
@@ -803,7 +802,17 @@ class IRCBot:
             # Check if the user has been seen in the specific channel
             if username_lower in self.last_seen and channel in self.last_seen[username_lower]:
                 last_seen_info = self.last_seen[username_lower][channel]
-                response = f"PRIVMSG {channel} :{sender}, <{username}> {last_seen_info['message']} @ {last_seen_info['timestamp']}\r\n"
+
+                # Convert the timestamp to a datetime object
+                timestamp = datetime.datetime.strptime(last_seen_info['timestamp'], "%Y-%m-%d %H:%M:%S")
+
+                # Calculate the time difference
+                time_difference = datetime.datetime.now() - timestamp
+
+                # Format the time difference as a human-readable string
+                formatted_time = self.format_timedelta(time_difference)
+
+                response = f"PRIVMSG {channel} :{sender}, {formatted_time} ago <{username}> {last_seen_info['message']}\r\n"
             else:
                 response = f"PRIVMSG {channel} :{sender}, I haven't seen {username} recently in {channel}.\r\n"
 
