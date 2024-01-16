@@ -7,6 +7,7 @@ import json
 import pytz
 import random
 import re
+import io
 import requests
 import ssl
 import threading
@@ -27,7 +28,7 @@ class IRCBot:
         self.port = port
         self.use_ssl = use_ssl
         self.admin_list = set(admin_list) if admin_list else set()
-        self.last_messages = deque(maxlen=200)
+        self.last_messages = {channel: deque(maxlen=200) for channel in channels}
         self.mushroom_facts = []
         self.message_queue = {}
         self.last_seen = {}
@@ -181,29 +182,39 @@ class IRCBot:
     async def save_message(self, message, channel):
         sender_match = re.match(r":(\S+)!\S+@\S+", message)
         sender = sender_match.group(1) if sender_match else "Unknown Sender"
-        content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
+
+        # Split the message into parts
+        message_parts = message.split('PRIVMSG')[1].split(':', 1)
+
+        # Extract the content of the message
+        content = message_parts[1].strip()
+
+        # Determine the local Dublin time
+        local_time = datetime.datetime.now(pytz.timezone('Europe/Dublin'))
 
         # Check if it's a CTCP ACTION message
         if content.startswith("\x01ACTION") and content.endswith("\x01"):
             # If it's an action message, extract the content without the triggers
             action_content = content[len("\x01ACTION") : -len("\x01")]
             formatted_message = {
-                "timestamp": datetime.datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "channel": channel,
+                "timestamp": local_time.strftime("%Y-%m-%d %H:%M:%S %Z"),
                 "sender": sender,
                 "content": f"* {sender}{action_content}"  # Format as an action message
             }
         else:
             # Regular PRIVMSG message
             formatted_message = {
-                "timestamp": datetime.datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "channel": channel,
+                "timestamp": local_time.strftime("%Y-%m-%d %H:%M:%S %Z"),
                 "sender": sender,
                 "content": content
             }
 
-        # Append the formatted message to the last_messages dictionary
-        self.last_messages.append(formatted_message)
+        # Check if the channel key exists in self.last_messages, if not, create it
+        if channel not in self.last_messages:
+            self.last_messages[channel] = []
+
+        # Append the formatted message to the specific channel's message history
+        self.last_messages[channel].append(formatted_message)
 
     async def handle_messages(self):
         global disconnect_requested
@@ -325,13 +336,15 @@ class IRCBot:
             elif content_type.startswith('text/plain'):
                 # Handle plain text file
                 return "Plain text file"
+            elif content_type.startswith('audio/'):
+                return "Audio file"
 
             soup = BeautifulSoup(response.text, 'lxml')
 
             # Function to get a list of sanitized titles from meta tags
             def get_meta_content(title_tag, meta_tags):
                 # Extract title from title tag
-                title_from_title_tag = title_tag.text if title_tag else None
+                title_from_title_tag = title_tag.text.strip() if title_tag else None
 
                 # Extract titles from meta tags
                 titles_from_meta_tags = [meta_tag.attrs.get('content', '').strip() for meta_tag in meta_tags]
@@ -363,17 +376,20 @@ class IRCBot:
 
             # If none of the above tags are found
             return "Title not found"
-
+        #
         except requests.exceptions.Timeout:
             print(f"Timeout retrieving webpage title for {url}")
             return "Timeout retrieving title"
-        except requests.exceptions.RequestException as e:
-            if hasattr(e, 'response') and e.response is not None and e.response.status_code == 404:
+        except requests.exceptions.HTTPError as http_err:
+            if http_err.response.status_code == 404:
                 print(f"Webpage not found (404) for {url}")
                 return "Webpage not found"
             else:
-                print(f"Error retrieving webpage title for {url}: {e}")
+                print(f"HTTP error {http_err.response.status_code} for {url}: {http_err}")
                 return "Error retrieving title"
+        except requests.exceptions.RequestException as e:
+            print(f"Error retrieving webpage title for {url}: {e}")
+            return "Error retrieving title"
 
     def format_file_size(self, size_in_bytes):
         for unit in ['B', 'KB', 'MB', 'GB']:
@@ -384,107 +400,23 @@ class IRCBot:
         return f"{size_in_bytes:.2f} TB"
 
     async def detect_and_parse_urls(self, message):
-        sender = message.split('!')[0][1:]
-        channel = message.split('PRIVMSG')[1].split(':')[0].strip()
-        content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
+        sender, channel, content = await self.extract_message_parts(message)
 
         urls = self.url_regex.findall(content)
 
         for url in urls:
             try:
-                # Check if the message starts with '@' symbol and contains a list of URLs
                 if content.startswith("@"):
                     return
 
-                # Filter out URLs with private IP addresses
                 if self.filter_private_ip(url):
                     print(f"Ignoring URL with private IP address: {url}")
                     continue
 
-                # Check if the URL is an Amazon link
-                if 'amazon.com' in url:
-                    # Extract relevant information from the Amazon link
-                    product_name = " ".join(url.split('/')[3].split('-')).title()  # Extract product name from URL
-                    response = f"[Amazon] Product: {product_name}"
+                response = await self.process_url(url)
 
-                else:
-                    # Extract the full name of the file from the URL
-                    file_name = url.split("/")[-1]
-
-                    # Check if the URL ends with a file extension
-                    if "." in file_name:
-                        file_extension = file_name.split(".")[-1].lower()
-                    else:
-                        file_extension = None
-
-                    # Extract the webpage title.
-                    webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
-                    print(f"webpage_title: {webpage_title}")
-
-                    if webpage_title == "Title not found":
-                        # Handle the case where the title is not found
-                        site_name = url.split('/')[2]  # Extract the site name from the URL
-                        paste_code = url.split('/')[-1]
-                        response = f"[Website] {site_name} paste: {paste_code}"
-
-                    elif webpage_title == "Image URL, no title available":
-                        # Handle the case where it's an image.
-                        site_name = url.split('/')[2] 
-                        paste_code = url.split('/')[-1]
-
-                        # Get the image size
-                        try:
-                            # Fetch only the image data without downloading the entire file
-                            image_response = requests.head(url, headers=self.headers)
-                            image_size_bytes = int(image_response.headers.get('Content-Length', 0))
-
-                            # Format the image size for better readability
-                            formatted_image_size = self.format_file_size(image_size_bytes)
-                        except Exception as e:
-                            print(f"Error fetching image size: {e}")
-                            formatted_image_size = "unknown size"
-
-                        response = f"[Website] {site_name} (Image) {paste_code} - Size: {formatted_image_size}"
-
-                    elif webpage_title == "Plain text file":
-                        # Handle the case where it's a plain text file.
-                        site_name = url.split('/')[2]
-                        paste_code = url.split('/')[-1]
-
-                        # Get the text file size using a GET request
-                        try:
-                            text_response = requests.get(url, headers=self.headers)
-                            text_size_bytes = len(text_response.content)
-
-                            formatted_text_size = self.format_file_size(text_size_bytes)
-                        except Exception as e:
-                            print(f"Error fetching text file size: {e}")
-                            formatted_text_size = "unknown size"
-
-                        response = f"[Website] {site_name} (Text) {paste_code} - Size: {formatted_text_size}"
-
-                    elif webpage_title == "Timeout retrieving title":
-                        print(f"Timeout retrieving title")
-                        return
-
-                    elif webpage_title == "Error retrieving title":
-                        print(f"Error retrieving title")
-                        return
-
-                    elif webpage_title == "Webpage not found":
-                        print(f"Error 404 - not found")
-                        return
-
-                    else:
-                        # Process the URL based on its file extension
-                        if file_extension in ["jpg", "jpeg", "png", "gif", "webp", "tiff", "eps", "ai", "indd", "raw"]:
-                            response = f"[Website] image file: {file_name}"
-                        elif file_extension in ["m4a", "flac", "wav", "wma", "aac", "mp3", "mp4", "avi", "webm", "mov", "wmv", "flv", "xm"]:
-                            response = f"[Website] media file: {file_name}"
-                        elif file_extension in ["sh", "bat", "rs", "cpp", "py", "java", "cs", "vb", "c", "txt", "pdf"]:
-                            response = f"[Website] data file: {file_name}"
-                        else:
-                            response = f"[Website] {webpage_title}"
+                if response is None:
+                    return
 
                 # Send the response to the channel
                 self.send(f'PRIVMSG {channel} :{response}\r\n')
@@ -497,8 +429,132 @@ class IRCBot:
             except Exception as e:
                 print(f"Error fetching or parsing URL: {e}")
 
-    def get_available_commands(self):
-        # List all available commands (excluding admin commands)
+    async def extract_message_parts(self, message):
+        sender = message.split('!')[0][1:]
+        channel = message.split('PRIVMSG')[1].split(':')[0].strip()
+        content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
+        return sender, channel, content
+
+    async def process_url(self, url):
+        if 'amazon.com' in url:
+            return self.process_amazon_url(url)
+        elif 'crates.io' in url:
+            return self.process_crates_url(url)
+        else:
+            return await self.process_generic_url(url)
+
+    def process_amazon_url(self, url):
+        product_name = " ".join(url.split('/')[3].split('-')).title()
+        return f"[Amazon] Product: {product_name}"
+
+    def process_crates_url(self, url):
+        # Extract the crate name and version from the URL
+        parts = url.split('/')
+        crate_name = parts[-2]
+        crate_version = parts[-1]
+
+        return f"[Webpage] crates.io: Rust Package Registry: {crate_name}{crate_version}"
+
+    async def process_generic_url(self, url):
+        file_name = url.split("/")[-1]
+
+        if "." in file_name:
+            file_extension = file_name.split(".")[-1].lower()
+        else:
+            file_extension = None
+
+        webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
+        print(f"webpage_title: {webpage_title}")
+
+        if webpage_title == "Title not found":
+            return self.handle_title_not_found(url)
+        elif webpage_title == "Image URL, no title available":
+            return await self.handle_image_url(url)
+        elif webpage_title == "Audio file":
+            return await self.handle_audio_file(url)
+        elif webpage_title == "Plain text file":
+            return await self.handle_text_file(url)
+        elif webpage_title == "Timeout retrieving title":
+            print(f"Timeout retrieving title")
+            return
+        elif webpage_title == "Error retrieving title":
+            print(f"Error retrieving title")
+            return
+        elif webpage_title == "Webpage not found":
+            print(f"Error 404 - not found")
+            return
+        else:
+            return self.return_page_title(url, webpage_title)
+
+    def handle_title_not_found(self, url):
+        site_name = url.split('/')[2]
+        paste_code = url.split('/')[-1]
+        return f"[Website] {site_name} paste: {paste_code}"
+
+    async def handle_image_url(self, url):
+        site_name = url.split('/')[2]
+        paste_code = url.split('/')[-1]
+
+        try:
+            image_response = requests.get(url, headers=self.headers)
+            image_size_bytes = len(image_response.content)
+            formatted_image_size = self.format_file_size(image_size_bytes)
+
+            # Use Pillow to get image dimensions
+            image = Image.open(io.BytesIO(image_response.content))
+            width, height = image.size
+            image_dimensions = f"{width}x{height}"
+
+        except Exception as e:
+            print(f"Error fetching image size: {e}")
+            formatted_image_size = "unknown size"
+            image_dimensions = "N/A"
+
+        return f"[Website] {site_name} (Image) {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
+
+    async def handle_audio_file(self, url):
+        # Handle the case where it's an audio file.
+        site_name = url.split('/')[2]
+        paste_code = url.split('/')[-1]
+
+        # Initialize the response variable with a default value
+        response = f"[Website] {site_name} (Audio) {paste_code} - Size: unknown size"
+
+        try:
+            audio_response = requests.get(url, headers=self.headers, stream=True)
+            audio_size_bytes = int(audio_response.headers.get('Content-Length', 0))
+
+            formatted_audio_size = self.format_file_size(audio_size_bytes)
+            response = f"[Website] {site_name} (Audio) {paste_code} - Size: {formatted_audio_size}"
+        except Exception as e:
+            print(f"Error fetching audio size: {e}")
+
+        return response
+
+    async def handle_text_file(self, url):
+        # Handle the case where it's a plain text file.
+        site_name = url.split('/')[2]
+        paste_code = url.split('/')[-1]
+
+        # Get the text file size using a GET request
+        try:
+            text_response = requests.get(url, headers=self.headers)
+            text_size_bytes = len(text_response.content)
+
+            formatted_text_size = self.format_file_size(text_size_bytes)
+            response = f"[Website] {site_name} (Text) {paste_code} - Size: {formatted_text_size}"
+        except Exception as e:
+            print(f"Error fetching text file size: {e}")
+            formatted_text_size = "unknown size"
+
+        return response
+
+    def return_page_title(self, url, webpage_title):
+        # Directly return the webpage title
+        return f"[Website] {webpage_title}"
+
+    def get_available_commands(self, exclude_admin=True):
+        # List all available commands (excluding admin commands by default)
         commands = [
             ".ping",
             ".roll",
@@ -514,7 +570,11 @@ class IRCBot:
             ".rollover",
             ".stats",
             ".version",
+            ".sed",
+            ".admin",
         ]
+        if exclude_admin:
+            commands.remove(".admin")
         return commands
 
     def get_detailed_help(self, command):
@@ -534,13 +594,16 @@ class IRCBot:
             ".rollover": "Rollover command: Woof woof!",
             ".stats": "Stats command: Display statistics for a user. Use '.stats <user>'.",
             ".version": "Version command: Shows the version of Clov3r",
+            ".sed": "Sed usage s/change_this/to_this/(g/i). Flags are optional. To include word boundaries use \\b Example: s/\\btest\\b/stuff. I can also take regex.",
+            ".admin": ".factadd - .quit - .join - .part - .op - .deop - .botop - .reload - .purge",
         }
 
         return help_dict.get(command, f"No detailed help available for {command}.")
 
-    async def help_command(self, channel, sender, args=None):
+    async def help_command(self, channel, sender, args=None, hostmask=None):
         # Get the list of available commands
-        available_commands = self.get_available_commands()
+        exclude_admin = False if hostmask in self.admin_list else True
+        available_commands = self.get_available_commands(exclude_admin=exclude_admin)
 
         if args:
             # Remove the leading period (.) if present
@@ -565,8 +628,9 @@ class IRCBot:
 
     def send_dog_cow_message(self, channel):
         dog_cow = "https://i.imgur.com/1S6flQw.gif"
-        response = "Hello Claris, dog or cow?"
-        self.send(f'PRIVMSG {channel} :{response} {dog_cow}\r\n')
+        response = "Hello Clarus, dog or cow?"
+        sound = "http://tinyurl.com/mooooof"
+        self.send(f'PRIVMSG {channel} :{response} {dog_cow} mooof {sound}\r\n')
 
     async def user_commands(self, message):
         global disconnect_requested
@@ -639,7 +703,7 @@ class IRCBot:
 
                         case '.help':
                             # Handle the help command
-                            await self.help_command(channel, sender, args)
+                            await self.help_command(channel, sender, args, hostmask)
 
                         case '.seen':
                             # Handle the !seen command
@@ -707,10 +771,10 @@ class IRCBot:
 
                         case '.reload' if hostmask in self.admin_list:
                             # Reload lists/dicts
-                            await self.purge_message_queue(channel, sender)
                             await self.reload_command(channel, sender)
-                else:
-                    print(f"Feature {command} not enabled or recognized.")
+
+                        case '.purge' if hostmask in self.admin_list:
+                            await self.purge_message_queue(channel, sender)
 
     async def stats_command(self, channel, sender, content):
         # Extract the target user from the command
@@ -754,7 +818,7 @@ class IRCBot:
             num_messages = 1 if num_messages_str is None else min(int(num_messages_str), 10)
 
             # Filter last messages for the specific channel
-            channel_messages = [(msg["timestamp"], msg["sender"], msg["content"]) for msg in self.last_messages if msg["channel"] == channel]
+            channel_messages = [(msg["timestamp"], msg["sender"], msg["content"]) for msg in self.last_messages[channel]]
 
             # Take the last N messages (N=num_messages)
             last_n_messages = channel_messages[-num_messages:]
@@ -773,9 +837,6 @@ class IRCBot:
             else:
                 response = f"PRIVMSG {sender} :No messages found in {channel}\r\n"
 
-                # Add a delay before sending the response
-                await asyncio.sleep(0.3)
-
                 self.send(response)
                 print(f"Sent: {response} to {sender}")
 
@@ -784,9 +845,6 @@ class IRCBot:
             response = f"PRIVMSG {channel} :[Last 1 message in {channel}]:\r\n"
             last_message = channel_messages[-1] if channel_messages else ("Unknown", "No messages found")
             response += f"PRIVMSG {sender} :[{last_message[0]}] <{last_message[1]}> {last_message[2]}\r\n"
-
-            # Add a delay before sending the response
-            await asyncio.sleep(0.3)
 
             self.send(response)
             print(f"Sent last messages to {sender} via direct message")
@@ -820,7 +878,7 @@ class IRCBot:
             print(f"Sent: {response} to {channel}")
 
         except ValueError:
-            response = f"PRIVMSG {channel} :Invalid !seen command format. Use: !seen username\r\n"
+            response = f"PRIVMSG {channel} :Invalid .seen command format. Use: .seen username\r\n"
             self.send(response)
 
     async def purge_message_queue(self, channel, sender):
@@ -941,7 +999,7 @@ class IRCBot:
             self.send(response)
             self.save_message_queue()
         except ValueError:
-            response = f"PRIVMSG {channel} :Invalid !tell command format. Use: !tell username message"
+            response = f"PRIVMSG {channel} :Invalid .tell command format. Use: .tell username message"
             self.send(response)
 
     def format_timedelta(self, delta):
@@ -1010,55 +1068,73 @@ class IRCBot:
     async def handle_sed_command(self, channel, sender, content):
         try:
             # Extract old, new, and flags using regex
-            match = re.match(r's/(.*?)/(.*?)(?:/([gi]*))?$', content)
+            match = re.match(r's/(.*?)/(.*?)(?:/([gi]*))?$', content.replace(r'\/', '__SLASH__'))
             if match:
                 old, new, flags = match.groups()
                 flags = flags if flags else ''  # Set flags to an empty string if not provided
+                # Unescape double slashes
+                old = old.replace("__SLASH__", "/")
+                new = new.replace("__SLASH__", "/")
+
+                # Escape newline characters in the new string
+                new = new.replace("\n", " ").replace("\r", " ")
+
+                # Check for word boundaries flag
+                word_boundaries = r'\b' if '\\b' in old else ''
+
+                # Update the regular expression with word boundaries
+                regex_pattern = fr'{word_boundaries}{old}{word_boundaries}'
+
             else:
                 raise ValueError("Invalid sed command format")
 
-            print(f"Processing sed command - Old: {old}, New: {new}, Flags: {flags}")
+            # Check if the channel key exists in self.last_messages
+            if channel in self.last_messages:
+                # Iterate over the entire message history for the specified channel and replace matching messages
+                corrected_message = None
+                for formatted_message in reversed(self.last_messages[channel]):
+                    original_message = formatted_message["content"]
+                    original_sender = formatted_message["sender"]
 
-            # Iterate over the entire message history for the specified channel and replace matching messages
-            corrected_message = None
-            for formatted_message in reversed(self.last_messages):
-                if formatted_message["channel"] != channel:
-                    continue  # Skip messages from other channels
+                    print(f"Checking message - Original: {original_message}")
 
-                original_message = formatted_message["content"]
-                original_sender = formatted_message["sender"]
+                    # Handle regex flags
+                    regex_flags = re.IGNORECASE if 'i' in flags else 0
 
-                print(f"Checking message - Original: {original_message}")
+                    # Set count based on the global flag
+                    count = 0 if 'g' in flags else 1
 
-                # Handle regex flags
-                regex_flags = re.IGNORECASE if 'i' in flags else 0
+                    # Replace old with new using regex substitution
+                    replaced_message = re.sub(old, new, original_message, flags=regex_flags, count=count)
 
-                # Set count based on the global flag
-                count = 0 if 'g' in flags else 1
+                    # Remove or replace newline characters in the corrected message
+                    replaced_message = replaced_message.replace("\n", " ").replace("\r", " ")
 
-                # Replace old with new using regex substitution
-                replaced_message = re.sub(old, new, original_message, flags=regex_flags, count=count)
+                    # Check if the message was actually replaced
+                    if replaced_message != original_message:
+                        corrected_message = replaced_message
+                        print(f"Match found - Corrected: {corrected_message}")
+                        break  # Stop when the first corrected message is found
 
-                # Check if the message was actually replaced
-                if replaced_message != original_message:
-                    corrected_message = replaced_message
-                    print(f"Match found - Corrected: {corrected_message}")
-                    break  # Stop when the first corrected message is found
+                # Check if a match was found
+                if corrected_message is not None:
+                    # Check if it's an action message (indicated by an asterisk at the beginning)
+                    if original_message.startswith("*"):
+                        # If it's an action message, send the corrected message without the original sender
+                        response = f"PRIVMSG {channel} :[Sed] {corrected_message}\r\n"
+                    else:
+                        # If it's a regular message, send the corrected message with the original sender
+                        response = f"PRIVMSG {channel} :[Sed] <{original_sender}> {corrected_message}\r\n"
 
-            # Check if a match was found
-            if corrected_message is not None:
-                # Check if it's an action message (indicated by an asterisk at the beginning)
-                if original_message.startswith("*"):
-                    # If it's an action message, send the corrected message without the original sender
-                    response = f"PRIVMSG {channel} :[Sed] {corrected_message}\r\n"
+                    self.send(response)
+                    print(f"Sent: {response} to {channel}")
                 else:
-                    # If it's a regular message, send the corrected message with the original sender
-                    response = f"PRIVMSG {channel} :[Sed] <{original_sender}> {corrected_message}\r\n"
+                    response = f"PRIVMSG {channel} :[Sed] No matching message found to correct\r\n"
+                    self.send(response)
+                    print(f"Sent: {response} to {channel}")
 
-                self.send(response)
-                print(f"Sent: {response} to {channel}")
             else:
-                response = f"PRIVMSG {channel} :[Sed] No matching message found to correct\r\n"
+                response = f"PRIVMSG {channel} :[Sed] No message history found for the channel\r\n"
                 self.send(response)
                 print(f"Sent: {response} to {channel}")
 
