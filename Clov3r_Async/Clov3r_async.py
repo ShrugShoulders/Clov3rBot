@@ -144,8 +144,8 @@ class IRCBot:
         else:
             self.reader, self.writer = await asyncio.open_connection(self.server, self.port)
 
-        self.send(f"USER {self.nickname} 0 * :{self.nickname}")
-        self.send(f"NICK {self.nickname}")
+        await self.send(f"USER {self.nickname} 0 * :{self.nickname}")
+        await self.send(f"NICK {self.nickname}")
 
     async def identify_with_nickserv(self):
         motd_received = False
@@ -155,7 +155,7 @@ class IRCBot:
             print(message)
 
             if "376" in message:  # End of MOTD
-                self.send(f'PRIVMSG NickServ :IDENTIFY {self.nickname} {self.nickserv_password}\r\n')
+                await self.send(f'PRIVMSG NickServ :IDENTIFY {self.nickname} {self.nickserv_password}\r\n')
                 print("Sent NickServ authentication.")  # End of MOTD
                 motd_received = True
 
@@ -165,17 +165,18 @@ class IRCBot:
                 print("Joined channels after NickServ authentication.")
                 break
 
-    def send(self, message):
-        self.writer.write((message + '\r\n').encode())
+    async def send(self, message):
+        safe_msg = await self.sanitize_input(message)
+        self.writer.write((safe_msg + '\r\n').encode())
 
     async def join_channel(self, channel):
-        self.send(f"JOIN {channel}")
+        await self.send(f"JOIN {channel}")
         await asyncio.sleep(0.3)
 
     async def keep_alive(self):
         while True:
             async with self.lock:
-                self.send("PING :keepalive")
+                await self.send("PING :keepalive")
                 print(f"Sent: PING to Server: {self.server}")
             await asyncio.sleep(195)
 
@@ -221,11 +222,11 @@ class IRCBot:
         disconnect_requested = False
         while not disconnect_requested:
             data = await self.reader.read(1000)
-            cleaned_data = self.strip_ansi_escape_sequences(data.decode(errors='replace'))
+            cleaned_data = data.decode(errors='replace')
             print(cleaned_data)
 
             if "PING" in cleaned_data:
-                self.send("PONG " + cleaned_data.split()[1])
+                await self.send("PONG " + cleaned_data.split()[1])
             elif "PRIVMSG" in cleaned_data:
                 # Extract sender, channel, and content information
                 sender_match = re.match(r":(\S+)!\S+@\S+", cleaned_data)
@@ -250,31 +251,31 @@ class IRCBot:
         print("Disconnecting...")
         await self.disconnect()
 
-    def strip_ansi_escape_sequences(self, text):
+    #def strip_ansi_escape_sequences(self, text):
         # Strip ANSI escape sequences and IRC formatting characters
-        ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
-        cleaned_text = ansi_escape.sub('', text)
+    #    ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
+    #    cleaned_text = ansi_escape.sub('', text)
 
         # Strip IRC color codes
-        irc_color = re.compile(r'\x03\d{0,2}(,\d{1,2})?')
-        cleaned_text = irc_color.sub('', cleaned_text)
+    #    irc_color = re.compile(r'\x03\d{0,2}(,\d{1,2})?')
+    #    cleaned_text = irc_color.sub('', cleaned_text)
 
         # Remove bold characters
-        bold_formatting = re.compile(r'\x02')
-        cleaned_text = bold_formatting.sub('', cleaned_text)
+    #    bold_formatting = re.compile(r'\x02')
+    #    cleaned_text = bold_formatting.sub('', cleaned_text)
 
         # Remove italics characters
-        italics_formatting = re.compile(r'\x1D')
-        cleaned_text = italics_formatting.sub('', cleaned_text)
+    #    italics_formatting = re.compile(r'\x1D')
+    #    cleaned_text = italics_formatting.sub('', cleaned_text)
 
         # Remove bold-italics characters
-        bold_italics_formatting = re.compile(r'\x02\x1D|\x1D\x02')
-        cleaned_text = bold_italics_formatting.sub('', cleaned_text)
+    #    bold_italics_formatting = re.compile(r'\x02\x1D|\x1D\x02')
+    #    cleaned_text = bold_italics_formatting.sub('', cleaned_text)
 
         # Remove Shift Out character
-        cleaned_text = cleaned_text.replace('\x0E', '')
+    #    cleaned_text = cleaned_text.replace('\x0E', '')
 
-        return cleaned_text
+    #    return cleaned_text
 
     async def record_last_seen(self, sender, channel, content):
         # Existing code for recording last seen information
@@ -296,7 +297,7 @@ class IRCBot:
         }
 
     async def get_channel_topic(self, channel: str) -> Optional[str]:
-        self.send(f"TOPIC {channel}")
+        await self.send(f"TOPIC {channel}")
         data = await self.reader.read(2048)
         message = data.decode("UTF-8")
 
@@ -308,7 +309,7 @@ class IRCBot:
 
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
-        safe_output = ''.join(char for char in decoded_input if 32 <= ord(char) <= 126)
+        safe_output = ''.join(char for char in decoded_input if (32 <= ord(char) <= 126) or char in '\x03\x02\x0F\x16\x1D\x1F\x01')
         return safe_output
 
     def filter_private_ip(self, url):
@@ -419,7 +420,7 @@ class IRCBot:
                     return
 
                 # Send the response to the channel
-                self.send(f'PRIVMSG {channel} :{response}\r\n')
+                await self.send(f'PRIVMSG {channel} :{response}\r\n')
                 print(f"Sent: {response} to {channel}")
 
             except requests.exceptions.Timeout:
@@ -623,14 +624,14 @@ class IRCBot:
             response = f"PRIVMSG {channel} :{sender}, Commands: {', '.join(available_commands)} Use: .help <command> for more info.\r\n"
 
         # Send the response to the channel
-        self.send(response)
+        await self.send(response)
         print(f"Sent: {response} to {channel}")
 
-    def send_dog_cow_message(self, channel):
+    async def send_dog_cow_message(self, channel):
         dog_cow = "https://i.imgur.com/1S6flQw.gif"
         response = "Hello Clarus, dog or cow?"
         sound = "http://tinyurl.com/mooooof"
-        self.send(f'PRIVMSG {channel} :{response} {dog_cow} mooof {sound}\r\n')
+        await self.send(f'PRIVMSG {channel} :{response} {dog_cow} mooof {sound}\r\n')
 
     async def user_commands(self, message):
         global disconnect_requested
@@ -666,7 +667,7 @@ class IRCBot:
                         case '.ping':
                             # PNOG
                             response = f"PRIVMSG {channel} :{sender}: PNOG!"
-                            self.send(response)
+                            await self.send(response)
 
                         case '.roll':
                             # Roll the dice
@@ -675,21 +676,21 @@ class IRCBot:
                         case '.fact':
                             # Extract the criteria from the user's command
                             criteria = self.extract_factoid_criteria(args)
-                            self.send_random_mushroom_fact(channel, criteria)
+                            await self.send_random_mushroom_fact(channel, criteria)
 
                         case '.tell':
                             # Save a message for a user
                             await self.handle_tell_command(channel, sender, content)
 
                         case '.info':
-                            self.handle_info_command(channel, sender)
+                            await self.handle_info_command(channel, sender)
 
                         case '.moo':
                             response = "Hi cow!"
-                            self.send(f'PRIVMSG {channel} :{response}\r\n')
+                            await self.send(f'PRIVMSG {channel} :{response}\r\n')
 
                         case '.moof':
-                            self.send_dog_cow_message(channel)
+                            await self.send_dog_cow_message(channel)
 
                         case '.topic':
                             # Get and send the channel topic
@@ -698,7 +699,7 @@ class IRCBot:
                                 response = f"PRIVMSG {channel} :{topic}\r\n"
                             else:
                                 response = f"PRIVMSG {channel} :Unable to retrieve the topic\r\n"
-                            self.send(response)
+                            await self.send(response)
                             print(f"Sent: {response} to {channel}")
 
                         case '.help':
@@ -715,14 +716,14 @@ class IRCBot:
                         case '.version':
                             version = "Clov3rBot Version 1.2"
                             response = f"PRIVMSG {channel} :{version}"
-                            self.send(response)
+                            await self.send(response)
 
                         case '.rollover':
                             # Perform the rollover action
                             barking_action = f"PRIVMSG {channel} :woof woof!"
                             action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
-                            self.send(barking_action)
-                            self.send(action_message)
+                            await self.send(barking_action)
+                            await self.send(action_message)
 
                         case '.stats':
                             # Handle the !stats command
@@ -737,37 +738,37 @@ class IRCBot:
                                 response = f"PRIVMSG {channel} :New mushroom fact added: {new_fact}"
                             else:
                                 response = f"PRIVMSG {channel} :Please provide a valid mushroom fact."
-                            self.send(response)
+                            await self.send(response)
 
                         case '.quit' if hostmask in self.admin_list:
                             # Quits the bot from the network.
                             response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
-                            self.send(response)
+                            await self.send(response)
                             disconnect_requested = True
 
                         case '.op' if hostmask in self.admin_list:
                             # Op the user
-                            self.send(f"MODE {channel} +o {sender}\r\n")
+                            await self.send(f"MODE {channel} +o {sender}\r\n")
 
                         case '.deop' if hostmask in self.admin_list:
                             # Deop the user
-                            self.send(f"MODE {channel} -o {sender}\r\n")
+                            await self.send(f"MODE {channel} -o {sender}\r\n")
 
                         case '.botop' if hostmask in self.admin_list:
                             # Op the bot using Chanserv
-                            self.send(f"PRIVMSG Chanserv :OP {channel} {self.nickname}\r\n")
+                            await self.send(f"PRIVMSG Chanserv :OP {channel} {self.nickname}\r\n")
 
                         case '.join' if hostmask in self.admin_list:
                             # Join a specified channel
                             if args:
                                 new_channel = args.split()[0]
-                                self.send(f"JOIN {new_channel}\r\n")
+                                await self.send(f"JOIN {new_channel}\r\n")
 
                         case '.part' if hostmask in self.admin_list:
                             # Part from a specified channel
                             if args:
                                 part_channel = args.split()[0]
-                                self.send(f"PART {part_channel}\r\n")
+                                await self.send(f"PART {part_channel}\r\n")
 
                         case '.reload' if hostmask in self.admin_list:
                             # Reload lists/dicts
@@ -788,13 +789,13 @@ class IRCBot:
             if target_user in self.last_seen and channel in self.last_seen[target_user]:
                 chat_count = self.last_seen[target_user][channel].get('chat_count', 0)
                 response = f"PRIVMSG {channel} :{sender}, I've seen {target_user} send {chat_count} messages"
-                self.send(response)
+                await self.send(response)
             else:
                 response = f"PRIVMSG {channel} :{sender}, no stats found for {target_user}"
-                self.send(response)
+                await self.send(response)
         else:
             response = f"PRIVMSG {channel} :{sender}, please provide a target user for the .stats command"
-            self.send(response)
+            await self.send(response)
 
     async def reload_command(self, channel, sender):
         self.channels_features = {}
@@ -805,7 +806,7 @@ class IRCBot:
         self.load_message_queue()
         self.load_last_seen()
         response = f"PRIVMSG {channel} :{sender}, Clov3r Successfully Reloaded.\r\n"
-        self.send(response)
+        await self.send(response)
         print(f"Sent: {response} to {channel}")
 
     async def last_command(self, channel, sender, content):
@@ -832,12 +833,12 @@ class IRCBot:
                 # Add a delay before sending the response
                 await asyncio.sleep(0.3)
 
-                self.send(response)
+                await self.send(response)
                 print(f"Sent last messages to {sender} via direct message")
             else:
                 response = f"PRIVMSG {sender} :No messages found in {channel}\r\n"
 
-                self.send(response)
+                await self.send(response)
                 print(f"Sent: {response} to {sender}")
 
         except ValueError:
@@ -846,7 +847,7 @@ class IRCBot:
             last_message = channel_messages[-1] if channel_messages else ("Unknown", "No messages found")
             response += f"PRIVMSG {sender} :[{last_message[0]}] <{last_message[1]}> {last_message[2]}\r\n"
 
-            self.send(response)
+            await self.send(response)
             print(f"Sent last messages to {sender} via direct message")
 
     async def seen_command(self, channel, sender, content):
@@ -874,12 +875,12 @@ class IRCBot:
             else:
                 response = f"PRIVMSG {channel} :{sender}, I haven't seen {username} recently in {channel}.\r\n"
 
-            self.send(response)
+            await self.send(response)
             print(f"Sent: {response} to {channel}")
 
         except ValueError:
             response = f"PRIVMSG {channel} :Invalid .seen command format. Use: .seen username\r\n"
-            self.send(response)
+            await self.send(response)
 
     async def purge_message_queue(self, channel, sender):
         # Clear the message_queue
@@ -889,12 +890,12 @@ class IRCBot:
         self.save_message_queue()
 
         response = f"PRIVMSG {channel} :{sender}, the message queue has been purged.\r\n"
-        self.send(response)
+        await self.send(response)
         print(f"Sent: {response} to {channel}")
 
-    def handle_info_command(self, channel, sender):
+    async def handle_info_command(self, channel, sender):
         response = f"Hiya! I'm Clov3r, a friendly IRC bot, {sender}! Please follow the rules: use .topic to see them."
-        self.send(f'PRIVMSG {channel} :{response}\r\n')
+        await self.send(f'PRIVMSG {channel} :{response}\r\n')
         print(f"Sent: {response} to {channel}")
 
     async def dice_roll(self, args, channel, sender):
@@ -937,14 +938,14 @@ class IRCBot:
         # Check if the total number of dice doesn't exceed 9999
         if num_dice * (dice_map.get(die_type, int(die_type[1:])) or int(die_type[1:])) > 9999:
             response = f"{sender}, Please request a more reasonable number of dice (up to 9999).\r\n"
-            self.send(f'PRIVMSG {channel} :{response}\r\n')
+            await self.send(f'PRIVMSG {channel} :{response}\r\n')
             return
 
         # Set a reasonable limit on the number of dice rolls (e.g., 1000)
         max_allowed_rolls = 10
         if num_dice > max_allowed_rolls:
             response = f"{sender}, Please request a more reasonable number of rolls (up to {max_allowed_rolls}).\r\n"
-            self.send(f'PRIVMSG {channel} :{response}\r\n')
+            await self.send(f'PRIVMSG {channel} :{response}\r\n')
             return
 
         # Check if the die_type is in the predefined dice_map or it's a custom die
@@ -956,7 +957,7 @@ class IRCBot:
         if not max_value:
             available_dice = ', '.join(dice_map.keys())
             response = f"{sender}, Invalid die type: {die_type}. Available dice types: {available_dice}.\r\n"
-            self.send(f'PRIVMSG {channel} :{response}\r\n')
+            await self.send(f'PRIVMSG {channel} :{response}\r\n')
             return
 
         # Roll the dice the specified number of times, but limit to max_allowed_rolls
@@ -970,7 +971,7 @@ class IRCBot:
         action_message = f"{sender} has rolled {num_dice} {die_type}'s modifier of {modifier}: {individual_rolls}. Total: {total}"
 
         print(f'Sending message: {action_message}')
-        self.send(f'PRIVMSG {channel} :{action_message}\r\n')
+        await self.send(f'PRIVMSG {channel} :{action_message}\r\n')
 
     async def handle_tell_command(self, channel, sender, content):
         try:
@@ -996,11 +997,11 @@ class IRCBot:
 
             # Notify the user that the message is saved
             response = f"PRIVMSG {channel} :{sender}, I'll tell {username} that when they return."
-            self.send(response)
+            await self.send(response)
             self.save_message_queue()
         except ValueError:
             response = f"PRIVMSG {channel} :Invalid .tell command format. Use: .tell username message"
-            self.send(response)
+            await self.send(response)
 
     def format_timedelta(self, delta):
         days, seconds = delta.days, delta.seconds
@@ -1042,20 +1043,20 @@ class IRCBot:
                     formatted_time_difference = self.format_timedelta(time_difference)
 
                     response = f"PRIVMSG {channel} :{sender}, {formatted_time_difference} ago <{recipient}> {saved_message} \r\n"
-                    self.send(response)
+                    await self.send(response)
                     print(f"Sent saved message to {channel}: {response}")
 
                 # Clear the saved messages for the user in the specific channel
                 del self.message_queue[key]
                 self.save_message_queue()
 
-    def send_random_mushroom_fact(self, channel, criteria=None):
+    async def send_random_mushroom_fact(self, channel, criteria=None):
         if self.mushroom_facts:
             filtered_facts = [fact for fact in self.mushroom_facts if criteria(fact)]
             
             if filtered_facts:
                 random_fact = random.choice(filtered_facts)
-                self.send(f"PRIVMSG {channel} :{random_fact}\r\n")
+                await self.send(f"PRIVMSG {channel} :{random_fact}\r\n")
                 print(f"Sent mushroom fact to {channel}: {random_fact}")
             else:
                 print("No matching mushroom facts found based on the criteria.")
@@ -1069,6 +1070,7 @@ class IRCBot:
         try:
             # Extract old, new, and flags using regex
             match = re.match(r's/(.*?)/(.*?)(?:/([gi]*))?$', content.replace(r'\/', '__SLASH__'))
+            character_limit = 256
             if match:
                 old, new, flags = match.groups()
                 flags = flags if flags else ''  # Set flags to an empty string if not provided
@@ -1078,6 +1080,9 @@ class IRCBot:
 
                 # Escape newline characters in the new string
                 new = new.replace("\n", " ").replace("\r", " ")
+
+                # Escape control characters in the old string
+                old = re.escape(old)
 
                 # Check for word boundaries flag
                 word_boundaries = r'\b' if '\\b' in old else ''
@@ -1092,6 +1097,7 @@ class IRCBot:
             if channel in self.last_messages:
                 # Iterate over the entire message history for the specified channel and replace matching messages
                 corrected_message = None
+                total_characters = 0
                 for formatted_message in reversed(self.last_messages[channel]):
                     original_message = formatted_message["content"]
                     original_sender = formatted_message["sender"]
@@ -1104,15 +1110,36 @@ class IRCBot:
                     # Set count based on the global flag
                     count = 0 if 'g' in flags else 1
 
+                    # Extract color codes from the original message
+                    color_codes = re.findall(r'\x03\d{0,2}(?:,\d{1,2})?', original_message)
+
                     # Replace old with new using regex substitution
-                    replaced_message = re.sub(old, new, original_message, flags=regex_flags, count=count)
+                    replaced_message = re.sub(regex_pattern, new, original_message, flags=regex_flags, count=count)
 
-                    # Remove or replace newline characters in the corrected message
-                    replaced_message = replaced_message.replace("\n", " ").replace("\r", " ")
+                    # Apply color codes to the corrected message
+                    corrected_message = ""
+                    color_code_index = 0
+                    for new_char in replaced_message:
+                        if color_code_index < len(color_codes):
+                            orig_char = original_message[color_code_index]
 
-                    # Check if the message was actually replaced
-                    if replaced_message != original_message:
-                        corrected_message = replaced_message
+                            if orig_char.isprintable() or orig_char.isspace():
+                                corrected_message += new_char
+                            else:
+                                # Skip non-printable characters in the original message
+                                corrected_message += orig_char
+                                color_code_index += 1
+                        else:
+                            corrected_message += new_char
+
+                    # Append remaining color codes that were not replaced
+                    corrected_message += ''.join(color_codes[color_code_index:])
+
+                    # Calculate the total characters
+                    total_characters += len(corrected_message)
+
+                    # Check if the message was actually replaced and if it exceeds the character limit
+                    if corrected_message != original_message and total_characters <= character_limit:
                         print(f"Match found - Corrected: {corrected_message}")
                         break  # Stop when the first corrected message is found
 
@@ -1121,30 +1148,30 @@ class IRCBot:
                     # Check if it's an action message (indicated by an asterisk at the beginning)
                     if original_message.startswith("*"):
                         # If it's an action message, send the corrected message without the original sender
-                        response = f"PRIVMSG {channel} :[Sed] {corrected_message}\r\n"
+                        response = f"PRIVMSG {channel} :[\x0303Sed\x03] {corrected_message}\r\n"
                     else:
                         # If it's a regular message, send the corrected message with the original sender
-                        response = f"PRIVMSG {channel} :[Sed] <{original_sender}> {corrected_message}\r\n"
+                        response = f"PRIVMSG {channel} :[\x0303Sed\x03] <{original_sender}> {corrected_message}\r\n"
 
-                    self.send(response)
+                    await self.send(response)
                     print(f"Sent: {response} to {channel}")
                 else:
-                    response = f"PRIVMSG {channel} :[Sed] No matching message found to correct\r\n"
-                    self.send(response)
+                    response = f"PRIVMSG {channel} :[\x0304Sed\x03] No matching message found to correct\r\n"
+                    await self.send(response)
                     print(f"Sent: {response} to {channel}")
 
             else:
-                response = f"PRIVMSG {channel} :[Sed] No message history found for the channel\r\n"
-                self.send(response)
+                response = f"PRIVMSG {channel} :[\x0304Sed\x03] No message history found for the channel\r\n"
+                await self.send(response)
                 print(f"Sent: {response} to {channel}")
 
         except re.error as e:
-            response = f"PRIVMSG {channel} :[Sed] Invalid sed command: {str(e)}\r\n"
-            self.send(response)
+            response = f"PRIVMSG {channel} :[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
+            await self.send(response)
             print(f"Sent: {response} to {channel}")
         except ValueError:
-            response = f"PRIVMSG {channel} :[Sed] Invalid sed command format\r\n"
-            self.send(response)
+            response = f"PRIVMSG {channel} :[\x0304Sed\x03] Invalid sed command format\r\n"
+            await self.send(response)
             print(f"Sent: {response} to {channel}")
 
     async def disconnect(self):
