@@ -32,9 +32,11 @@ class IRCBot:
         self.mushroom_facts = []
         self.message_queue = {}
         self.last_seen = {}
+        self.last_command_time = {}
         self.reader = None
         self.writer = None
         self.last_issued_command = None
+        self.MIN_COMMAND_INTERVAL = 5
         self.lock = asyncio.Lock()
         self.url_regex = re.compile(r'https?://\S+')
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -251,32 +253,6 @@ class IRCBot:
         print("Disconnecting...")
         await self.disconnect()
 
-    #def strip_ansi_escape_sequences(self, text):
-        # Strip ANSI escape sequences and IRC formatting characters
-    #    ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
-    #    cleaned_text = ansi_escape.sub('', text)
-
-        # Strip IRC color codes
-    #    irc_color = re.compile(r'\x03\d{0,2}(,\d{1,2})?')
-    #    cleaned_text = irc_color.sub('', cleaned_text)
-
-        # Remove bold characters
-    #    bold_formatting = re.compile(r'\x02')
-    #    cleaned_text = bold_formatting.sub('', cleaned_text)
-
-        # Remove italics characters
-    #    italics_formatting = re.compile(r'\x1D')
-    #    cleaned_text = italics_formatting.sub('', cleaned_text)
-
-        # Remove bold-italics characters
-    #    bold_italics_formatting = re.compile(r'\x02\x1D|\x1D\x02')
-    #    cleaned_text = bold_italics_formatting.sub('', cleaned_text)
-
-        # Remove Shift Out character
-    #    cleaned_text = cleaned_text.replace('\x0E', '')
-
-    #    return cleaned_text
-
     async def record_last_seen(self, sender, channel, content):
         # Existing code for recording last seen information
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -327,57 +303,80 @@ class IRCBot:
 
     async def extract_webpage_title(self, url):
         try:
-            response = requests.get(url, headers=self.headers, timeout=(1.0, 0.5))
-            response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
+            # Send a HEAD request to get the content length and type
+            head_response = requests.head(url, headers=self.headers)
+            head_response.raise_for_status()
 
-            # Check if the content type is an image or plain text
-            content_type = response.headers.get('Content-Type', '').lower()
+            # Get the content length from the headers
+            content_length = int(head_response.headers.get('Content-Length', 0))
+
+            # Check if the content type is an image, plain text, audio, or ISO file
+            content_type = head_response.headers.get('Content-Type', '').lower()
+
+            # Define the maximum file size allowed (in bytes)
+            MAX_FILE_SIZE = 256 * 1024 * 1024  # 256 MB
+
+            # Define the list of executable file extensions
+            EXECUTABLE_FILE_EXTENSIONS = ['.exe', '.dll', '.bat', '.jar', '.iso']
+
             if content_type.startswith('image/'):
-                return "Image URL, no title available"
+                return "Image"
             elif content_type.startswith('text/plain'):
                 # Handle plain text file
                 return "Plain text file"
             elif content_type.startswith('audio/'):
                 return "Audio file"
+            elif content_type == 'application/x-iso9660-image':
+                return "ISO"
+            elif content_length > MAX_FILE_SIZE:
+                return "Max Size"
+            elif any(url.lower().endswith(ext) for ext in EXECUTABLE_FILE_EXTENSIONS):
+                return "Banned File Type"
+            else:
+                # Download the content and extract the webpage title
+                response = requests.get(url, headers=self.headers, timeout=(1.0, 0.5))
+                response.raise_for_status()
 
-            soup = BeautifulSoup(response.text, 'lxml')
+                # Decode response content using appropriate encoding
+                encoding = response.encoding if 'charset' in response.headers.get('content-type', '').lower() else None
+                soup = BeautifulSoup(response.content, 'html.parser', from_encoding=encoding)
 
-            # Function to get a list of sanitized titles from meta tags
-            def get_meta_content(title_tag, meta_tags):
-                # Extract title from title tag
-                title_from_title_tag = title_tag.text.strip() if title_tag else None
+                # Function to get a list of sanitized titles from meta tags
+                def get_meta_content(title_tag, meta_tags):
+                    # Extract title from title tag
+                    title_from_title_tag = title_tag.text.strip() if title_tag else None
 
-                # Extract titles from meta tags
-                titles_from_meta_tags = [meta_tag.attrs.get('content', '').strip() for meta_tag in meta_tags]
+                    # Extract titles from meta tags
+                    titles_from_meta_tags = [meta_tag.attrs.get('content', '').strip() for meta_tag in meta_tags]
 
-                # Combine and prioritize titles
-                all_titles = [title_from_title_tag] + [title for title in titles_from_meta_tags if title]
+                    # Combine and prioritize titles
+                    all_titles = [title_from_title_tag] + [title for title in titles_from_meta_tags if title]
 
-                return all_titles
+                    return all_titles
 
-            # Look for the first og:title meta tag, Twitter Card title, Dublin Core title,
-            # meta tag with name attribute set to "title", and the title tag directly in the head
-            og_title_tags = soup.find_all('meta', {'property': 'og:title'})
-            twitter_title_tags = soup.find_all('meta', {'name': 'twitter:title'})
-            dc_title_tags = soup.find_all('meta', {'name': 'DC.title'})
-            meta_name_title_tags = soup.find_all('meta', {'name': 'title'})
-            title_tag = soup.head.title
+                # Look for the first og:title meta tag, Twitter Card title, Dublin Core title,
+                # meta tag with name attribute set to "title", and the title tag directly in the head
+                og_title_tags = soup.find_all('meta', {'property': 'og:title'})
+                twitter_title_tags = soup.find_all('meta', {'name': 'twitter:title'})
+                dc_title_tags = soup.find_all('meta', {'name': 'DC.title'})
+                meta_name_title_tags = soup.find_all('meta', {'name': 'title'})
+                title_tag = soup.head.title
 
-            # Combine all meta tags
-            all_meta_tags = og_title_tags + twitter_title_tags + dc_title_tags + meta_name_title_tags
+                # Combine all meta tags
+                all_meta_tags = og_title_tags + twitter_title_tags + dc_title_tags + meta_name_title_tags
 
-            # Get all titles from title tag and meta tags
-            all_titles = get_meta_content(title_tag, all_meta_tags)
+                # Get all titles from title tag and meta tags
+                all_titles = get_meta_content(title_tag, all_meta_tags)
 
-            if all_titles:
-                sanitized_titles = [html.unescape(title) for title in all_titles]
-                title = sanitized_titles[0]
-                print(f"Extracted title from meta tags and title tag: {title}")
-                return title
+                if all_titles:
+                    sanitized_titles = [html.unescape(title) for title in all_titles]
+                    title = sanitized_titles[0]
+                    print(f"Extracted title from meta tags and title tag: {title}")
+                    return title
 
-            # If none of the above tags are found
-            return "Title not found"
-        #
+                # If none of the above tags are found
+                return "Title not found"
+
         except requests.exceptions.Timeout:
             print(f"Timeout retrieving webpage title for {url}")
             return "Timeout retrieving title"
@@ -467,25 +466,35 @@ class IRCBot:
         webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
         print(f"webpage_title: {webpage_title}")
 
-        if webpage_title == "Title not found":
-            return self.handle_title_not_found(url)
-        elif webpage_title == "Image URL, no title available":
-            return await self.handle_image_url(url)
-        elif webpage_title == "Audio file":
-            return await self.handle_audio_file(url)
-        elif webpage_title == "Plain text file":
-            return await self.handle_text_file(url)
-        elif webpage_title == "Timeout retrieving title":
-            print(f"Timeout retrieving title")
-            return
-        elif webpage_title == "Error retrieving title":
-            print(f"Error retrieving title")
-            return
-        elif webpage_title == "Webpage not found":
-            print(f"Error 404 - not found")
-            return
-        else:
-            return self.return_page_title(url, webpage_title)
+        match webpage_title:
+            case "Title not found":
+                return self.handle_title_not_found(url)
+            case "Image":
+                return await self.handle_image_url(url)
+            case "Audio file":
+                return await self.handle_audio_file(url)
+            case "Plain text file":
+                return await self.handle_text_file(url)
+            case "Banned File Type":
+                print(f"Banned File Type")
+                return
+            case "ISO":
+                print(f"ISO")
+                return
+            case "Max Size":
+                print(f"Max Size")
+                return
+            case "Timeout retrieving title":
+                print(f"Timeout retrieving title")
+                return
+            case "Error retrieving title":
+                print(f"Error retrieving title")
+                return
+            case "Webpage not found":
+                print(f"Error 404 - not found")
+                return
+            case _:
+                return self.return_page_title(url, webpage_title)
 
     def handle_title_not_found(self, url):
         site_name = url.split('/')[2]
@@ -597,7 +606,7 @@ class IRCBot:
             ".stats": "Stats command: Display statistics for a user. Use '.stats <user>'.",
             ".version": "Version command: Shows the version of Clov3r",
             ".sed": "Sed usage s/change_this/to_this/(g/i). Flags are optional. To include word boundaries use \\b Example: s/\\btest\\b/stuff. I can also take regex.",
-            ".weather": "Search weather forecast - example: .weather Ireland - Can search by address or other terms"
+            ".weather": "Search weather forecast - example: .weather Ireland - Can search by address or other terms",
             ".admin": ".factadd - .quit - .join - .part - .op - .deop - .botop - .reload - .purge",
         }
 
@@ -661,6 +670,12 @@ class IRCBot:
         else:
             # Check if there are any words in the content before accessing the first word
             if content:
+                # Check if user's last command time is tracked, and calculate time elapsed
+                if sender in self.last_command_time:
+                    time_elapsed = time.time() - self.last_command_time[sender]
+                    if time_elapsed < self.MIN_COMMAND_INTERVAL:
+                        return
+
                 command = content.split()[0]
                 args = content[len(command):].strip()
 
@@ -668,37 +683,47 @@ class IRCBot:
                     match command:
                         case '.ping':
                             # PNOG
+                            # Update last command time
+                            self.last_command_time[sender] = time.time()
                             response = f"PRIVMSG {channel} :{sender}: PNOG!"
                             await self.send(response)
 
                         case '.weather':
+                            self.last_command_time[sender] = time.time()
                             await self.get_weather(args, channel)
 
                         case '.roll':
                             # Roll the dice
+                            self.last_command_time[sender] = time.time()
                             await self.dice_roll(args, channel, sender)
 
                         case '.fact':
                             # Extract the criteria from the user's command
+                            self.last_command_time[sender] = time.time()
                             criteria = self.extract_factoid_criteria(args)
                             await self.send_random_mushroom_fact(channel, criteria)
 
                         case '.tell':
                             # Save a message for a user
+                            self.last_command_time[sender] = time.time()
                             await self.handle_tell_command(channel, sender, content)
 
                         case '.info':
+                            self.last_command_time[sender] = time.time()
                             await self.handle_info_command(channel, sender)
 
                         case '.moo':
+                            self.last_command_time[sender] = time.time()
                             response = "Hi cow!"
                             await self.send(f'PRIVMSG {channel} :{response}\r\n')
 
                         case '.moof':
+                            self.last_command_time[sender] = time.time()
                             await self.send_dog_cow_message(channel)
 
                         case '.topic':
                             # Get and send the channel topic
+                            self.last_command_time[sender] = time.time()
                             topic = await self.get_channel_topic(channel)
                             if topic:
                                 response = f"PRIVMSG {channel} :{topic}\r\n"
@@ -709,21 +734,26 @@ class IRCBot:
 
                         case '.help':
                             # Handle the help command
+                            self.last_command_time[sender] = time.time()
                             await self.help_command(channel, sender, args, hostmask)
 
                         case '.seen':
                             # Handle the !seen command
+                            self.last_command_time[sender] = time.time()
                             await self.seen_command(channel, sender, content)
 
                         case '.last':
+                            self.last_command_time[sender] = time.time()
                             await self.last_command(channel, sender, content)
 
                         case '.version':
+                            self.last_command_time[sender] = time.time()
                             version = "Clov3rBot Version 1.2"
                             response = f"PRIVMSG {channel} :{version}"
                             await self.send(response)
 
                         case '.rollover':
+                            self.last_command_time[sender] = time.time()
                             # Perform the rollover action
                             barking_action = f"PRIVMSG {channel} :woof woof!"
                             action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
@@ -731,6 +761,7 @@ class IRCBot:
                             await self.send(action_message)
 
                         case '.stats':
+                            self.last_command_time[sender] = time.time()
                             # Handle the !stats command
                             await self.stats_command(channel, sender, content)
 
@@ -789,7 +820,7 @@ class IRCBot:
 
         try:
             # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=KEY_HERE")
+            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=65b583605ab6a403481192yza5a9247")
             print("Geocoding response status code:", response.status_code)
             print("Geocoding response content:", response.content)
             
@@ -816,7 +847,7 @@ class IRCBot:
 
     async def get_weather(self, location, channel):
         # Set your user agent
-        user_agent = "Clov3r_forecast, EMAIL@EMAIL.COM"
+        user_agent = "Clov3r_forecast, connorkim.kim3@gmail.com"
 
         # Get latitude and longitude from geocoding
         lat, lon = await self.geocode_location(location)
@@ -854,10 +885,14 @@ class IRCBot:
                     print("Next 1 hour summary:", next_1_hours_summary)
                     next_6_hours_summary = current_forecast.get("data", {}).get("next_6_hours", {}).get("summary", {})
                     print("Next 6 hours summary:", next_6_hours_summary)
+
+                    # Calculate temperature in Fahrenheit
+                    celsius_temp = instant_details.get('air_temperature')
+                    fahrenheit_temp = (celsius_temp * 9/5) + 32
                     
                     # Construct weather forecast message
                     forecast_message = f"{location}, lat={lat}, lon={lon}:"
-                    temp_message = f"Current temperature: {instant_details.get('air_temperature')} °C"
+                    temp_message = f"Current temperature: {celsius_temp}C/{fahrenheit_temp}F"
                     cloud_message = f"Cloud coverage: {instant_details.get('cloud_area_fraction')}%"
                     humidity_message = f"Humidity: {instant_details.get('relative_humidity')}%"
                     wind_direction = f"Wind Direction: {instant_details.get('wind_from_direction')}"
@@ -866,7 +901,7 @@ class IRCBot:
                     nxt6hr_message = f"Next 6 hours: {next_6_hours_summary.get('symbol_code', 'N/A')}"
                     
                     # Send weather forecast to the channel
-                    response = f"PRIVMSG {channel} :{forecast_message} " + f"{temp_message} " + f"{cloud_message} " + f"{humidity_message} " + f"{wind_speed} " + f"{wind_direction}" + f"{nxt1hr_message} " + f"{nxt6hr_message} "
+                    response = f"PRIVMSG {channel} :{forecast_message} " + f"{temp_message} " + f"{cloud_message} " + f"{humidity_message} " + f"{wind_speed} " + f"{wind_direction} " + f"{nxt1hr_message} " + f"{nxt6hr_message} "
                     await self.send(response)
                     return
                 
@@ -928,15 +963,14 @@ class IRCBot:
 
             # Send the last messages to the user via direct message
             if last_n_messages:
-                response = f"PRIVMSG {sender} :[Last {num_messages} messages in {channel}]:\r\n"
                 for timestamp, nickname, msg_content in last_n_messages:
-                    response += f"PRIVMSG {sender} :[{timestamp}] <{nickname}> {msg_content}\r\n"
+                    response = f"PRIVMSG {sender} :[Last message in {channel}]: {timestamp} <{nickname}> {msg_content}\r\n"
+                    
+                    # Add a delay before sending each response
+                    await asyncio.sleep(0.3)
 
-                # Add a delay before sending the response
-                await asyncio.sleep(0.3)
-
-                await self.send(response)
-                print(f"Sent last messages to {sender} via direct message")
+                    await self.send(response)
+                    print(f"Sent last message to {sender} via direct message")
             else:
                 response = f"PRIVMSG {sender} :No messages found in {channel}\r\n"
 
