@@ -820,7 +820,7 @@ class IRCBot:
 
         try:
             # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=65b583605ab6a403481192yza5a9247")
+            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=APIT_KEY_HERE")
             print("Geocoding response status code:", response.status_code)
             print("Geocoding response content:", response.content)
             
@@ -847,7 +847,7 @@ class IRCBot:
 
     async def get_weather(self, location, channel):
         # Set your user agent
-        user_agent = "Clov3r_forecast, connorkim.kim3@gmail.com"
+        user_agent = "Clov3r_forecast, YOUR@EMAIL.com"
 
         # Get latitude and longitude from geocoding
         lat, lon = await self.geocode_location(location)
