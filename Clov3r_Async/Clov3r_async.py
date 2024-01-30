@@ -169,7 +169,7 @@ class IRCBot:
 
     async def send(self, message):
         safe_msg = await self.sanitize_input(message)
-        self.writer.write((safe_msg + '\r\n').encode())
+        self.writer.write((safe_msg + '\r\n').encode('utf-8'))
 
     async def join_channel(self, channel):
         await self.send(f"JOIN {channel}")
@@ -224,7 +224,7 @@ class IRCBot:
         disconnect_requested = False
         while not disconnect_requested:
             data = await self.reader.read(1000)
-            cleaned_data = data.decode(errors='replace')
+            cleaned_data = data.decode('utf-8', errors='replace')
             print(cleaned_data)
 
             if "PING" in cleaned_data:
@@ -1237,44 +1237,46 @@ class IRCBot:
 
                     print(f"Checking message - Original: {original_message}")
 
-                    # Handle regex flags
-                    regex_flags = re.IGNORECASE if 'i' in flags else 0
+                    # Check if the old string exists in the message
+                    if re.search(old, original_message):
+                        # Handle regex flags
+                        regex_flags = re.IGNORECASE if 'i' in flags else 0
 
-                    # Set count based on the global flag
-                    count = 0 if 'g' in flags else 1
+                        # Set count based on the global flag
+                        count = 0 if 'g' in flags else 1
 
-                    # Extract color codes from the original message using the find_color_codes function
-                    color_codes = self.find_color_codes(original_message)
+                        # Extract color codes from the original message using the find_color_codes function
+                        color_codes = self.find_color_codes(original_message)
 
-                    # Replace old with new using regex substitution
-                    replaced_message = re.sub(regex_pattern, new, original_message, flags=regex_flags, count=count)
+                        # Replace old with new using regex substitution
+                        replaced_message = re.sub(regex_pattern, new, original_message, flags=regex_flags, count=count)
 
-                    # Apply color codes to the corrected message
-                    corrected_message = ""
-                    color_code_index = 0
-                    for new_char in replaced_message:
-                        if color_code_index < len(color_codes):
-                            orig_char = original_message[color_code_index]
+                        # Apply color codes to the corrected message
+                        corrected_message = ""
+                        color_code_index = 0
+                        for new_char in replaced_message:
+                            if color_code_index < len(color_codes):
+                                orig_char = original_message[color_code_index]
 
-                            if orig_char.isprintable() or orig_char.isspace():
-                                corrected_message += new_char
+                                if orig_char.isprintable() or orig_char.isspace():
+                                    corrected_message += new_char
+                                else:
+                                    # Skip non-printable characters in the original message
+                                    corrected_message += orig_char
+                                    color_code_index += 1
                             else:
-                                # Skip non-printable characters in the original message
-                                corrected_message += orig_char
-                                color_code_index += 1
-                        else:
-                            corrected_message += new_char
+                                corrected_message += new_char
 
-                    # Append remaining color codes that were not replaced
-                    corrected_message += ''.join(color_codes[color_code_index:])
+                        # Append remaining color codes that were not replaced
+                        corrected_message += ''.join(color_codes[color_code_index:])
 
-                    # Calculate the total characters
-                    total_characters += len(corrected_message)
+                        # Calculate the total characters
+                        total_characters += len(corrected_message)
 
-                    # Check if the message was actually replaced and if it exceeds the character limit
-                    if corrected_message != original_message and total_characters <= character_limit:
-                        print(f"Match found - Corrected: {corrected_message}")
-                        break  # Stop when the first corrected message is found
+                        # Check if the message was actually replaced and if it exceeds the character limit
+                        if corrected_message != original_message and total_characters <= character_limit:
+                            print(f"Match found - Corrected: {corrected_message}")
+                            break  # Stop when the first corrected message is found
 
                 # Check if a match was found
                 if corrected_message is not None:
@@ -1310,7 +1312,7 @@ class IRCBot:
     def find_color_codes(self, original_message):
         color_codes = []
         i = 0
-        while i < len(original_message):
+        while i < len(original_message) - 2:  # Ensure there are enough characters remaining
             if original_message[i] == '\x03':
                 # Check if the following characters form a valid color code pattern
                 code = original_message[i:i+3]
