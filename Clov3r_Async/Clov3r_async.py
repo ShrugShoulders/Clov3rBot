@@ -231,19 +231,19 @@ class IRCBot:
                     await self.send(f"PONG {tokens.params[0]}")
                 elif tokens.command == "PRIVMSG":
                     sender = tokens.source.split('!')[0] if tokens.source else "Unknown Sender"
+                    hostmask = tokens.source if tokens.source else "Unknown Hostmask"
                     channel = tokens.params[0]
                     content = tokens.params[1]
 
                     await self.save_message(sender, content, channel)
                     await self.send_saved_messages(sender, channel)
 
-                    # Additional command handling as before
                     if await self.handle_channel_features(channel, '.record'):
                         await self.record_last_seen(sender, channel, content)
                         self.save_last_seen()
 
                     if await self.handle_channel_features(channel, '.usercommands'):
-                        await self.user_commands(line)
+                        await self.user_commands(sender, channel, content, hostmask)
 
                     if await self.handle_channel_features(channel, '.urlparse'):
                         await self.detect_and_parse_urls(line)
@@ -252,7 +252,6 @@ class IRCBot:
         await self.disconnect()
 
     async def record_last_seen(self, sender, channel, content):
-        # Existing code for recording last seen information
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Update or create the last_seen dictionary for the user and channel
@@ -677,20 +676,8 @@ class IRCBot:
         sound = "http://tinyurl.com/mooooof"
         await self.send(f'PRIVMSG {channel} :{response} {dog_cow} mooof {sound}\r\n')
 
-    async def user_commands(self, message):
+    async def user_commands(self, sender, channel, content, hostmask):
         global disconnect_requested
-        sender_match = re.match(r":(\S+)!\S+@\S+", message)
-        if not sender_match:
-            print("Unable to extract sender from the message:", message)
-            return
-
-        sender = sender_match.group(1)
-        channel = message.split('PRIVMSG')[1].split(':')[0].strip()
-        content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
-
-        hostmask_match = re.search(r":(\S+!\S+@\S+)", message)
-        hostmask = hostmask_match.group(1) if hostmask_match else "Unknown Hostmask"
-
         print(f"Sender: {sender}")
         print(f"Channel: {channel}")
         print(f"Content: {content}")
@@ -853,7 +840,7 @@ class IRCBot:
 
         try:
             # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=")
+            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=65b583605ab6a403481192yza5a9247")
             print("Geocoding response status code:", response.status_code)
             print("Geocoding response content:", response.content)
             
@@ -880,7 +867,7 @@ class IRCBot:
 
     async def get_weather(self, location, channel):
         # Set your user agent
-        user_agent = "Clov3r_forecast, your@email.com"
+        user_agent = "Clov3r_forecast, connorkim.kim3@gmail.com"
 
         # Get latitude and longitude from geocoding
         lat, lon = await self.geocode_location(location)
@@ -1261,69 +1248,45 @@ class IRCBot:
 
             # Check if the channel key exists in self.last_messages
             if channel in self.last_messages:
-                # Iterate over the entire message history for the specified channel and replace matching messages
                 corrected_message = None
+                original_sender_corrected = None
                 total_characters = 0
                 for formatted_message in reversed(self.last_messages[channel]):
                     original_message = formatted_message["content"]
                     original_sender = formatted_message["sender"]
 
-                    # Skip if the message is a sed command
                     if re.match(r'^s/.*/.*/?[gi]*$', original_message):
                         continue
 
-                    print(f"Checking message - Original: {original_message}")
+                    print(f"Checking message - Original: <{original_sender}> {original_message}")
 
-                    # Check if the old string exists in the message
                     if re.search(old, original_message):
-                        # Handle regex flags
                         regex_flags = re.IGNORECASE if 'i' in flags else 0
-
-                        # Set count based on the global flag
                         count = 0 if 'g' in flags else 1
 
-                        # Extract color codes from the original message using the find_color_codes function
+                        # Extract color codes before replacement
                         color_codes = self.find_color_codes(original_message)
 
-                        # Replace old with new using regex substitution
+                        # Perform the replacement
                         replaced_message = re.sub(regex_pattern, new, original_message, flags=regex_flags, count=count)
+                        total_characters += len(replaced_message)
 
-                        # Apply color codes to the corrected message
-                        corrected_message = ""
-                        color_code_index = 0
-                        for new_char in replaced_message:
-                            if color_code_index < len(color_codes):
-                                orig_char = original_message[color_code_index]
+                        if replaced_message != original_message and total_characters <= character_limit:
+                            corrected_message = replaced_message
+                            original_sender_corrected = original_sender
+                            print(f"Match found - Corrected: <{original_sender_corrected}> {corrected_message}")
+                            
+                            # Reapply the first color code to the corrected message
+                            if color_codes:
+                                corrected_message = color_codes[0] + corrected_message + '\x03'
+                            
+                            break
 
-                                if orig_char.isprintable() or orig_char.isspace():
-                                    corrected_message += new_char
-                                else:
-                                    # Skip non-printable characters in the original message
-                                    corrected_message += orig_char
-                                    color_code_index += 1
-                            else:
-                                corrected_message += new_char
-
-                        # Append remaining color codes that were not replaced
-                        corrected_message += ''.join(color_codes[color_code_index:])
-
-                        # Calculate the total characters
-                        total_characters += len(corrected_message)
-
-                        # Check if the message was actually replaced and if it exceeds the character limit
-                        if corrected_message != original_message and total_characters <= character_limit:
-                            print(f"Match found - Corrected: {corrected_message}")
-                            break  # Stop when the first corrected message is found
-
-                # Check if a match was found
-                if corrected_message is not None:
-                    # Check if it's an action message (indicated by an asterisk at the beginning)
-                    if original_message.startswith("*"):
-                        # If it's an action message, send the corrected message without the original sender
+                if corrected_message is not None and original_sender_corrected is not None:
+                    if corrected_message.startswith("*"):
                         response = f"PRIVMSG {channel} :[\x0303Sed\x03] {corrected_message}\r\n"
                     else:
-                        # If it's a regular message, send the corrected message with the original sender
-                        response = f"PRIVMSG {channel} :[\x0303Sed\x03] <{original_sender}> {corrected_message}\r\n"
+                        response = f"PRIVMSG {channel} :[\x0303Sed\x03] <{original_sender_corrected}> {corrected_message}\r\n"
 
                     await self.send(response)
                     print(f"Sent: {response} to {channel}")
