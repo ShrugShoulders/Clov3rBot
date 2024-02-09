@@ -8,6 +8,7 @@ import pytz
 import random
 import re
 import io
+import irctokens
 import requests
 import ssl
 import threading
@@ -39,7 +40,7 @@ class IRCBot:
         self.MIN_COMMAND_INTERVAL = 5
         self.lock = asyncio.Lock()
         self.url_regex = re.compile(r'https?://\S+')
-        self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.48'}
 
     @classmethod
     def from_config_file(cls, config_file, features_file='channels_features.json'):
@@ -182,73 +183,70 @@ class IRCBot:
                 print(f"Sent: PING to Server: {self.server}")
             await asyncio.sleep(195)
 
-    async def save_message(self, message, channel):
-        sender_match = re.match(r":(\S+)!\S+@\S+", message)
-        sender = sender_match.group(1) if sender_match else "Unknown Sender"
-
-        # Split the message into parts
-        message_parts = message.split('PRIVMSG')[1].split(':', 1)
-
-        # Extract the content of the message
-        content = message_parts[1].strip()
-
-        # Determine the local Dublin time
-        local_time = datetime.datetime.now(pytz.timezone('Europe/Dublin'))
+    async def save_message(self, sender, content, channel):
+        # Use system's current time for Unix timestamp
+        unix_timestamp = int(datetime.datetime.now().timestamp())
 
         # Check if it's a CTCP ACTION message
         if content.startswith("\x01ACTION") and content.endswith("\x01"):
             # If it's an action message, extract the content without the triggers
-            action_content = content[len("\x01ACTION") : -len("\x01")]
+            action_content = content[len("\x01ACTION"): -len("\x01")]
             formatted_message = {
-                "timestamp": local_time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "timestamp": unix_timestamp,
                 "sender": sender,
-                "content": f"* {sender}{action_content}"  # Format as an action message
+                "content": f"* {sender} {action_content}"  # Format as an action message
             }
         else:
             # Regular PRIVMSG message
             formatted_message = {
-                "timestamp": local_time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "timestamp": unix_timestamp,
                 "sender": sender,
                 "content": content
             }
 
-        # Check if the channel key exists in self.last_messages, if not, create it
+        # Append the formatted message to the specific channel's message history
         if channel not in self.last_messages:
             self.last_messages[channel] = []
-
-        # Append the formatted message to the specific channel's message history
         self.last_messages[channel].append(formatted_message)
 
     async def handle_messages(self):
         global disconnect_requested
         disconnect_requested = False
+        buffer = ""  # Initialize an empty buffer for accumulating data
+
         while not disconnect_requested:
             data = await self.reader.read(1000)
-            cleaned_data = data.decode('utf-8', errors='replace')
-            print(cleaned_data)
+            buffer += data.decode('UTF-8', errors='replace')
 
-            if "PING" in cleaned_data:
-                await self.send("PONG " + cleaned_data.split()[1])
-            elif "PRIVMSG" in cleaned_data:
-                # Extract sender, channel, and content information
-                sender_match = re.match(r":(\S+)!\S+@\S+", cleaned_data)
-                sender = sender_match.group(1) if sender_match else "Unknown Sender"
-                channel = cleaned_data.split('PRIVMSG')[1].split(':')[0].strip()
-                content = cleaned_data.split('PRIVMSG')[1].split(':', 1)[1].strip()
+            while '\n' in buffer:
+                line, buffer = buffer.split('\n', 1)
+                line = line.rstrip('\r')
 
-                # Record the last seen information for the user
-                if await self.handle_channel_features(channel, '.record'):
-                    await self.record_last_seen(sender, channel, content)
-                    self.save_last_seen()
+                if not line:
+                    continue
 
-                if await self.handle_channel_features(channel, '.usercommands'):
-                    await self.user_commands(cleaned_data)
+                tokens = irctokens.tokenise(line)
 
-                if await self.handle_channel_features(channel, '.urlparse'):
-                    await self.detect_and_parse_urls(cleaned_data)
+                if tokens.command == "PING":
+                    await self.send(f"PONG {tokens.params[0]}")
+                elif tokens.command == "PRIVMSG":
+                    sender = tokens.source.split('!')[0] if tokens.source else "Unknown Sender"
+                    channel = tokens.params[0]
+                    content = tokens.params[1]
 
-                await self.save_message(cleaned_data, channel)
-                await self.send_saved_messages(cleaned_data)
+                    await self.save_message(sender, content, channel)
+                    await self.send_saved_messages(sender, channel)
+
+                    # Additional command handling as before
+                    if await self.handle_channel_features(channel, '.record'):
+                        await self.record_last_seen(sender, channel, content)
+                        self.save_last_seen()
+
+                    if await self.handle_channel_features(channel, '.usercommands'):
+                        await self.user_commands(line)
+
+                    if await self.handle_channel_features(channel, '.urlparse'):
+                        await self.detect_and_parse_urls(line)
 
         print("Disconnecting...")
         await self.disconnect()
@@ -285,7 +283,14 @@ class IRCBot:
 
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
-        safe_output = ''.join(char for char in decoded_input if (32 <= ord(char) <= 126) or char in '\x03\x02\x0F\x16\x1D\x1F\x01')
+        # Allow Unicode characters through by checking if the character is not a control character,
+        # except for the whitelisted control codes ('\x03', '\x02', '\x0F', '\x16', '\x1D', '\x1F', '\x01').
+        # This version considers characters outside the basic ASCII control characters as allowed,
+        # including extended Unicode characters.
+        safe_output = ''.join(
+            char for char in decoded_input
+            if (ord(char) > 31 and ord(char) != 127) or char in '\x03\x02\x0F\x16\x1D\x1F\x01'
+        )
         return safe_output
 
     def filter_private_ip(self, url):
@@ -305,7 +310,9 @@ class IRCBot:
         try:
             # Send a HEAD request to get the content length and type
             head_response = requests.head(url, headers=self.headers)
+            print(f"{head_response}")
             head_response.raise_for_status()
+            print(f"processing head response")
 
             # Get the content length from the headers
             content_length = int(head_response.headers.get('Content-Length', 0))
@@ -336,6 +343,7 @@ class IRCBot:
                 # Download the content and extract the webpage title
                 response = requests.get(url, headers=self.headers, timeout=(1.0, 0.5))
                 response.raise_for_status()
+                print(f"getting webpage title")
 
                 # Decode response content using appropriate encoding
                 encoding = response.encoding if 'charset' in response.headers.get('content-type', '').lower() else None
@@ -440,8 +448,33 @@ class IRCBot:
             return self.process_amazon_url(url)
         elif 'crates.io' in url:
             return self.process_crates_url(url)
+        elif 'bpa.st' in url:
+            return await self.process_bpa(url)
         else:
             return await self.process_generic_url(url)
+
+    async def process_bpa(self, url):
+        try:
+            response = await self.fetch_bpa_st_site(url)
+            return await self.extract_webpage_title_from_bpa(response)
+        except Exception as e:
+            print(f"Error processing bpa.st link: {e}")
+
+    async def fetch_bpa_st_site(self, url):
+        try:
+            response = requests.get(url, headers=self.headers, timeout=(1.0, 0.5))
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            raise Exception(f"Error fetching bpa.st site content: {e}")
+
+    async def extract_webpage_title_from_bpa(self, html_content):
+        soup = BeautifulSoup(html_content, 'html.parser')
+        title_tag = soup.head.title
+        if title_tag:
+            return f"[bpa.st] {title_tag.text.strip()}"
+        else:
+            return "Title not found"
 
     def process_amazon_url(self, url):
         product_name = " ".join(url.split('/')[3].split('-')).title()
@@ -820,7 +853,7 @@ class IRCBot:
 
         try:
             # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=APIT_KEY_HERE")
+            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=")
             print("Geocoding response status code:", response.status_code)
             print("Geocoding response content:", response.content)
             
@@ -847,7 +880,7 @@ class IRCBot:
 
     async def get_weather(self, location, channel):
         # Set your user agent
-        user_agent = "Clov3r_forecast, YOUR@EMAIL.com"
+        user_agent = "Clov3r_forecast, your@email.com"
 
         # Get latitude and longitude from geocoding
         lat, lon = await self.geocode_location(location)
@@ -1124,8 +1157,8 @@ class IRCBot:
             if key not in self.message_queue:
                 self.message_queue[key] = []
 
-            # Get the current time in UTC
-            utc_now = datetime.datetime.now(pytz.utc)
+            # Get the current time in UTC without pytz
+            utc_now = datetime.datetime.utcnow()
 
             # Save the message for the user in the specific channel with a timestamp
             timestamp = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -1145,10 +1178,9 @@ class IRCBot:
         minutes, seconds = divmod(remainder, 60)
         return f"{days}d {hours}h {minutes}m {seconds}s"
 
-    async def send_saved_messages(self, message):
-        sender_match = re.match(r":(\S+)!\S+@\S+", message)
-        sender = sender_match.group(1) if sender_match else "Unknown Sender"
-        channel = message.split('PRIVMSG')[1].split(':')[0].strip()
+    async def send_saved_messages(self, sender, channel):
+        # Convert the sender nickname to lowercase for case-insensitive comparison
+        sender_lower = sender.lower()
 
         # Iterate over keys in the message_queue and find matching recipients
         for key, messages in list(self.message_queue.items()):
@@ -1158,19 +1190,20 @@ class IRCBot:
                 print(f"Error unpacking key: {key}")
                 continue
 
-            # Convert the sender and recipient nicknames to lowercase for case-insensitive comparison
-            sender_lower = sender.lower()
+            # Convert the recipient nickname to lowercase for case-insensitive comparison
             recipient_lower = saved_recipient.lower()
 
             # Check if the lowercase nicknames match and the channels are the same
             if sender_lower == recipient_lower and channel == saved_channel:
-                # Get the current time
-                current_time = datetime.datetime.utcnow()
+                # Get the current time as offset-aware
+                current_time = datetime.datetime.now(datetime.timezone.utc)
 
-                # Calculate the time difference once outside the loop
                 for (username, recipient, saved_message, timestamp) in messages:
-                    # Convert the timestamp to a datetime object
-                    message_time = datetime.datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S %Z')
+                    # Convert the timestamp to a datetime object and make it offset-aware
+                    timestamp = timestamp.rstrip(" UTC")  # Remove ' UTC' suffix
+                    message_time_naive = datetime.datetime.fromisoformat(timestamp)
+                    # Make it offset-aware by specifying UTC timezone
+                    message_time = message_time_naive.replace(tzinfo=datetime.timezone.utc)
 
                     # Calculate the time difference
                     time_difference = current_time - message_time
@@ -1234,6 +1267,10 @@ class IRCBot:
                 for formatted_message in reversed(self.last_messages[channel]):
                     original_message = formatted_message["content"]
                     original_sender = formatted_message["sender"]
+
+                    # Skip if the message is a sed command
+                    if re.match(r'^s/.*/.*/?[gi]*$', original_message):
+                        continue
 
                     print(f"Checking message - Original: {original_message}")
 
