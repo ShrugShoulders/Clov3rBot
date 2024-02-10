@@ -37,6 +37,7 @@ class IRCBot:
         self.reader = None
         self.writer = None
         self.last_issued_command = None
+        self.topic_command = False
         self.MIN_COMMAND_INTERVAL = 5
         self.lock = asyncio.Lock()
         self.url_regex = re.compile(r'https?://\S+')
@@ -247,6 +248,18 @@ class IRCBot:
 
                     if await self.handle_channel_features(channel, '.urlparse'):
                         await self.detect_and_parse_urls(line)
+                elif tokens.command == "332":  # TOPIC message
+                    if self.topic_command == True:
+                        topic = tokens.params[2]
+                        channel = tokens.params[1]
+                        print(f"{topic}")
+                        if topic:
+                            response = f"PRIVMSG {channel} :{topic}\r\n"
+                        else:
+                            response = f"PRIVMSG {channel} :Unable to retrieve the topic\r\n"
+                        await self.send(response)
+                        print(f"Sent: {response} to {channel}")
+                        self.topic_command = False
 
         print("Disconnecting...")
         await self.disconnect()
@@ -270,15 +283,8 @@ class IRCBot:
         }
 
     async def get_channel_topic(self, channel: str) -> Optional[str]:
+        self.topic_command = True
         await self.send(f"TOPIC {channel}")
-        data = await self.reader.read(2048)
-        message = data.decode("UTF-8")
-
-        if "332" in message:  # TOPIC message
-            topic = message.split(":", 2)[2].strip()
-            return topic
-        else:
-            return None
 
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
@@ -744,13 +750,7 @@ class IRCBot:
                         case '.topic':
                             # Get and send the channel topic
                             self.last_command_time[sender] = time.time()
-                            topic = await self.get_channel_topic(channel)
-                            if topic:
-                                response = f"PRIVMSG {channel} :{topic}\r\n"
-                            else:
-                                response = f"PRIVMSG {channel} :Unable to retrieve the topic\r\n"
-                            await self.send(response)
-                            print(f"Sent: {response} to {channel}")
+                            await self.get_channel_topic(channel)
 
                         case '.help':
                             # Handle the help command
@@ -840,7 +840,7 @@ class IRCBot:
 
         try:
             # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=65b583605ab6a403481192yza5a9247")
+            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=")
             print("Geocoding response status code:", response.status_code)
             print("Geocoding response content:", response.content)
             
@@ -867,7 +867,7 @@ class IRCBot:
 
     async def get_weather(self, location, channel):
         # Set your user agent
-        user_agent = "Clov3r_forecast, connorkim.kim3@gmail.com"
+        user_agent = "Clov3r_forecast, your@email.com"
 
         # Get latitude and longitude from geocoding
         lat, lon = await self.geocode_location(location)
