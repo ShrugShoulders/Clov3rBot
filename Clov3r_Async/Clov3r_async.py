@@ -195,7 +195,7 @@ class IRCBot:
             formatted_message = {
                 "timestamp": unix_timestamp,
                 "sender": sender,
-                "content": f"* {sender} {action_content}"  # Format as an action message
+                "content": f"* {sender}{action_content}"  # Format as an action message
             }
         else:
             # Regular PRIVMSG message
@@ -294,7 +294,7 @@ class IRCBot:
         # including extended Unicode characters.
         safe_output = ''.join(
             char for char in decoded_input
-            if (ord(char) > 31 and ord(char) != 127) or char in '\x03\x02\x0F\x16\x1D\x1F\x01'
+            if (ord(char) > 31 and ord(char) != 127) or char in '\x03\x02\x0F\x16\x1E\x1D\x1F\x01'
         )
         return safe_output
 
@@ -451,6 +451,8 @@ class IRCBot:
     async def process_url(self, url):
         if 'amazon.com' in url:
             return self.process_amazon_url(url)
+        elif 'amazon.co.uk' in url:
+            return self.process_amazon_url(url)
         elif 'crates.io' in url:
             return self.process_crates_url(url)
         elif 'bpa.st' in url:
@@ -477,13 +479,13 @@ class IRCBot:
         soup = BeautifulSoup(html_content, 'html.parser')
         title_tag = soup.head.title
         if title_tag:
-            return f"[bpa.st] {title_tag.text.strip()}"
+            return f"[\x0303bpa.st\x03] {title_tag.text.strip()}"
         else:
             return "Title not found"
 
     def process_amazon_url(self, url):
         product_name = " ".join(url.split('/')[3].split('-')).title()
-        return f"[Amazon] Product: {product_name}"
+        return f"[\x0303Amazon\x03] Product: {product_name}"
 
     def process_crates_url(self, url):
         # Extract the crate name and version from the URL
@@ -491,7 +493,7 @@ class IRCBot:
         crate_name = parts[-2]
         crate_version = parts[-1]
 
-        return f"[Webpage] crates.io: Rust Package Registry: {crate_name}{crate_version}"
+        return f"[\x0303Webpage\x03] crates.io: Rust Package Registry: {crate_name}{crate_version}"
 
     async def process_generic_url(self, url):
         file_name = url.split("/")[-1]
@@ -537,7 +539,7 @@ class IRCBot:
     def handle_title_not_found(self, url):
         site_name = url.split('/')[2]
         paste_code = url.split('/')[-1]
-        return f"[Website] {site_name} paste: {paste_code}"
+        return f"[\x0304Title Not Found\x03] {site_name} paste: {paste_code}"
 
     async def handle_image_url(self, url):
         site_name = url.split('/')[2]
@@ -558,7 +560,7 @@ class IRCBot:
             formatted_image_size = "unknown size"
             image_dimensions = "N/A"
 
-        return f"[Website] {site_name} (Image) {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
+        return f"[\x0306Image File\x03] {site_name} {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
 
     async def handle_audio_file(self, url):
         # Handle the case where it's an audio file.
@@ -566,14 +568,14 @@ class IRCBot:
         paste_code = url.split('/')[-1]
 
         # Initialize the response variable with a default value
-        response = f"[Website] {site_name} (Audio) {paste_code} - Size: unknown size"
+        response = f"[\x0307Audio File\x03] {site_name} (Audio) {paste_code} - Size: unknown size"
 
         try:
             audio_response = requests.get(url, headers=self.headers, stream=True)
             audio_size_bytes = int(audio_response.headers.get('Content-Length', 0))
 
             formatted_audio_size = self.format_file_size(audio_size_bytes)
-            response = f"[Website] {site_name} (Audio) {paste_code} - Size: {formatted_audio_size}"
+            response = f"[\x0307Audio File\x03] {site_name} {paste_code} - Size: {formatted_audio_size}"
         except Exception as e:
             print(f"Error fetching audio size: {e}")
 
@@ -590,7 +592,7 @@ class IRCBot:
             text_size_bytes = len(text_response.content)
 
             formatted_text_size = self.format_file_size(text_size_bytes)
-            response = f"[Website] {site_name} (Text) {paste_code} - Size: {formatted_text_size}"
+            response = f"[\x0313Text File\x03] {site_name} {paste_code} - Size: {formatted_text_size}"
         except Exception as e:
             print(f"Error fetching text file size: {e}")
             formatted_text_size = "unknown size"
@@ -599,7 +601,7 @@ class IRCBot:
 
     def return_page_title(self, url, webpage_title):
         # Directly return the webpage title
-        return f"[Website] {webpage_title}"
+        return f"[\x0303Website\x03] {webpage_title}"
 
     def get_available_commands(self, exclude_admin=True):
         # List all available commands (excluding admin commands by default)
@@ -688,6 +690,10 @@ class IRCBot:
         print(f"Channel: {channel}")
         print(f"Content: {content}")
         print(f"Full Hostmask: {hostmask}")
+
+        # Ignore empty or whitespace-only content
+        if not content.strip():
+            return
 
         # Check if the message starts with 's/' for sed-like command
         if content and content.startswith('s/'):
@@ -1224,13 +1230,13 @@ class IRCBot:
 
     async def handle_sed_command(self, channel, sender, content):
         try:
-            # Extract old, new, and flags using regex
-            match = re.match(r's/(.*?)/(.*?)(?:/([gi]*))?$', content.replace(r'\/', '__SLASH__'))
+            match = re.match(r's/(.*?)/(.*?)(?:/([gi]*))?(/(\d*))?(?:/(.*))?$', content.replace(r'\/', '__SLASH__'))
             character_limit = 256
             if match:
-                old, new, flags = match.groups()
-                flags = flags if flags else ''  # Set flags to an empty string if not provided
-                # Unescape double slashes
+                old, new, flags, _, occurrence, target_nickname = match.groups()  # Adjusted unpacking to match the new group structure
+                flags = flags if flags else ''  # Ensure flags are set to an empty string if not provided
+                occurrence = int(occurrence) if occurrence else 0  # Convert occurrence to an integer if provided, defaulting to 0
+                # Unescape slashes that were replaced
                 old = old.replace("__SLASH__", "/")
                 new = new.replace("__SLASH__", "/")
 
@@ -1251,24 +1257,36 @@ class IRCBot:
                 corrected_message = None
                 original_sender_corrected = None
                 total_characters = 0
+                regex_flags = re.IGNORECASE if 'i' in flags else 0
                 for formatted_message in reversed(self.last_messages[channel]):
                     original_message = formatted_message["content"]
                     original_sender = formatted_message["sender"]
 
-                    if re.match(r'^s/.*/.*/?[gi]*$', original_message):
+                    # Skip messages not matching the target nickname if specified
+                    if target_nickname and original_sender != target_nickname:
+                        continue
+
+                    if re.match(r'^s/.*/.*/?[gi]*\d*$', original_message):
                         continue
 
                     print(f"Checking message - Original: <{original_sender}> {original_message}")
 
-                    if re.search(old, original_message):
-                        regex_flags = re.IGNORECASE if 'i' in flags else 0
-                        count = 0 if 'g' in flags else 1
-
+                    if re.search(regex_pattern, original_message, flags=regex_flags):
                         # Extract color codes before replacement
                         color_codes = self.find_color_codes(original_message)
 
-                        # Perform the replacement
-                        replaced_message = re.sub(regex_pattern, new, original_message, flags=regex_flags, count=count)
+                        if occurrence:
+                            # Function to replace only the specified occurrence
+                            def replace_nth(match):
+                                nonlocal occurrence
+                                occurrence -= 1
+                                return new if occurrence == 0 else match.group(0)
+
+                            replaced_message = re.sub(regex_pattern, replace_nth, original_message, flags=regex_flags)
+                        else:
+                            count = 0 if 'g' in flags else 1
+                            replaced_message = re.sub(regex_pattern, new, original_message, flags=regex_flags, count=count)
+
                         total_characters += len(replaced_message)
 
                         if replaced_message != original_message and total_characters <= character_limit:
@@ -1291,7 +1309,7 @@ class IRCBot:
                     await self.send(response)
                     print(f"Sent: {response} to {channel}")
                 else:
-                    response = f"PRIVMSG {channel} :[\x0304Sed\x03] No matching message found to correct\r\n"
+                    response = f"PRIVMSG {channel} :[\x0304Sed\x03] No matching message found to correct from {target_nickname}\r\n"
                     await self.send(response)
                     print(f"Sent: {response} to {channel}")
 
