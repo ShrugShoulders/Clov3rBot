@@ -13,6 +13,7 @@ import requests
 import ssl
 import threading
 import time
+from requests.exceptions import HTTPError, Timeout, RequestException
 from PIL import Image
 from bs4 import BeautifulSoup
 from collections import deque
@@ -31,6 +32,7 @@ class IRCBot:
         self.admin_list = set(admin_list) if admin_list else set()
         self.last_messages = {channel: deque(maxlen=200) for channel in channels}
         self.mushroom_facts = []
+        self.ignore_list = ["sqtbot", "LitBot"]
         self.message_queue = {}
         self.last_seen = {}
         self.last_command_time = {}
@@ -72,6 +74,35 @@ class IRCBot:
         if channel in self.channels_features and command in self.channels_features[channel]:
             return True
         return False
+
+    async def save_last_messages(self, filename="messages.json"):
+        # Convert deque objects to lists for JSON serialization
+        serializable_last_messages = {channel: list(messages) for channel, messages in self.last_messages.items()}
+        
+        # Ensure the function is thread-safe if called concurrently
+        async with self.lock:
+            try:
+                with open(filename, 'w') as file:
+                    json.dump(serializable_last_messages, file, indent=2)
+                print(f"Saved last messages to {filename}")
+            except Exception as e:
+                print(f"Error saving last messages: {e}")
+
+    async def load_last_messages(self, filename="messages.json"):
+        # Ensure the function is thread-safe if called concurrently
+        async with self.lock:
+            try:
+                with open(filename, 'r') as file:
+                    # Load messages from the file
+                    loaded_messages = json.load(file)
+                
+                # Convert lists back to deque objects and update self.last_messages
+                self.last_messages = {channel: deque(messages, maxlen=200) for channel, messages in loaded_messages.items()}
+                print(f"Loaded last messages from {filename}")
+            except FileNotFoundError:
+                print(f"{filename} not found. Starting with an empty message history.")
+            except Exception as e:
+                print(f"Error loading last messages: {e}")
 
     def save_last_seen(self, filename="last_seen.json"):
         try:
@@ -236,6 +267,10 @@ class IRCBot:
                     channel = tokens.params[0]
                     content = tokens.params[1]
 
+                    if sender in self.ignore_list:
+                        print(f"Ignored message from {sender}")
+                        continue
+
                     await self.save_message(sender, content, channel)
                     await self.send_saved_messages(sender, channel)
 
@@ -313,11 +348,24 @@ class IRCBot:
 
     async def extract_webpage_title(self, url):
         try:
-            # Send a HEAD request to get the content length and type
-            head_response = requests.head(url, headers=self.headers)
-            print(f"{head_response}")
-            head_response.raise_for_status()
-            print(f"processing head response")
+            headers = {"User-Agent": "YourUserAgentStringHere"}
+            try:
+                # Initial attempt with a HEAD request
+                head_response = requests.head(url, headers=headers)
+                head_response.raise_for_status()
+            except HTTPError as e:
+                if e.response.status_code == 400:
+                    # Fallback to a GET request if HEAD request fails with a 400 error
+                    print("HEAD request failed with 400, falling back to GET request.")
+                    head_response = requests.get(url, headers=headers, stream=True)
+                    head_response.raise_for_status()
+                elif e.response.status_code == 405:
+                    # Fallback to a GET request if HEAD request fails with a 405 error
+                    print("HEAD request failed with 405, falling back to GET request.")
+                    head_response = requests.get(url, headers=headers, stream=True)
+                    head_response.raise_for_status()
+                else:
+                    raise
 
             # Get the content length from the headers
             content_length = int(head_response.headers.get('Content-Length', 0))
@@ -560,7 +608,7 @@ class IRCBot:
             formatted_image_size = "unknown size"
             image_dimensions = "N/A"
 
-        return f"[\x0306Image File\x03] {site_name} {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
+        return f"[\x0311Image File\x03] {site_name} {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
 
     async def handle_audio_file(self, url):
         # Handle the case where it's an audio file.
@@ -696,7 +744,7 @@ class IRCBot:
             return
 
         # Check if the message starts with 's/' for sed-like command
-        if content and content.startswith('s/'):
+        if content and content.startswith(('s/', 'S/')):
             if await self.handle_channel_features(channel, '.sed'):
                 await self.handle_sed_command(channel, sender, content)
         else:
@@ -717,7 +765,7 @@ class IRCBot:
                             # PNOG
                             # Update last command time
                             self.last_command_time[sender] = time.time()
-                            response = f"PRIVMSG {channel} :{sender}: PNOG!"
+                            response = f"PRIVMSG {channel} :[\x0303Ping\x03] {sender}: PNOG!"
                             await self.send(response)
 
                         case '.weather':
@@ -806,6 +854,7 @@ class IRCBot:
                             # Quits the bot from the network.
                             response = f"PRIVMSG {channel} :Acknowledged {sender} quitting..."
                             await self.send(response)
+                            await self.save_last_messages()
                             disconnect_requested = True
 
                         case '.op' if hostmask in self.admin_list:
@@ -917,7 +966,7 @@ class IRCBot:
                     fahrenheit_temp = (celsius_temp * 9/5) + 32
                     
                     # Construct weather forecast message
-                    forecast_message = f"{location}, lat={lat}, lon={lon}:"
+                    forecast_message = f"[\x0311{location}\x03]:" #, lat={lat}, lon={lon}
                     temp_message = f"Current temperature: {celsius_temp}C/{fahrenheit_temp}F"
                     cloud_message = f"Cloud coverage: {instant_details.get('cloud_area_fraction')}%"
                     humidity_message = f"Humidity: {instant_details.get('relative_humidity')}%"
@@ -1230,7 +1279,7 @@ class IRCBot:
 
     async def handle_sed_command(self, channel, sender, content):
         try:
-            match = re.match(r's/(.*?)/(.*?)(?:/([gi]*))?(/(\d*))?(?:/(.*))?$', content.replace(r'\/', '__SLASH__'))
+            match = re.match(r'[sS]/(.*?)/(.*?)(?:/([gi]*))?(/(\d*))?(?:/(.*))?$', content.replace(r'\/', '__SLASH__'))
             character_limit = 256
             if match:
                 old, new, flags, _, occurrence, target_nickname = match.groups()  # Adjusted unpacking to match the new group structure
@@ -1266,15 +1315,12 @@ class IRCBot:
                     if target_nickname and original_sender != target_nickname:
                         continue
 
-                    if re.match(r'^s/.*/.*/?[gi]*\d*$', original_message):
+                    if re.match(r'^[sS]/.*/.*/?[gi]*\d*$', original_message):
                         continue
 
                     print(f"Checking message - Original: <{original_sender}> {original_message}")
 
                     if re.search(regex_pattern, original_message, flags=regex_flags):
-                        # Extract color codes before replacement
-                        color_codes = self.find_color_codes(original_message)
-
                         if occurrence:
                             # Function to replace only the specified occurrence
                             def replace_nth(match):
@@ -1293,10 +1339,6 @@ class IRCBot:
                             corrected_message = replaced_message
                             original_sender_corrected = original_sender
                             print(f"Match found - Corrected: <{original_sender_corrected}> {corrected_message}")
-                            
-                            # Reapply the first color code to the corrected message
-                            if color_codes:
-                                corrected_message = color_codes[0] + corrected_message + '\x03'
                             
                             break
 
@@ -1327,23 +1369,6 @@ class IRCBot:
             await self.send(response)
             print(f"Sent: {response} to {channel}")
 
-    def find_color_codes(self, original_message):
-        color_codes = []
-        i = 0
-        while i < len(original_message) - 2:  # Ensure there are enough characters remaining
-            if original_message[i] == '\x03':
-                # Check if the following characters form a valid color code pattern
-                code = original_message[i:i+3]
-                if code[1:].isdigit() or (code[1] == ',' and code[2:].isdigit()):
-                    color_codes.append(code)
-                    i += 3
-                else:
-                    i += 1
-            else:
-                i += 1
-
-        return color_codes
-
     async def disconnect(self):
         if self.writer:
             self.writer.close()
@@ -1354,6 +1379,7 @@ class IRCBot:
             self.load_mushroom_facts()
             self.load_message_queue()
             self.load_last_seen()
+            await self.load_last_messages()
             await self.connect()
 
             # Identify with NickServ
