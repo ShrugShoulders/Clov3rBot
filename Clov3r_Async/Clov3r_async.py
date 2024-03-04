@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+import base64
 import configparser
 import datetime
 import html
@@ -196,23 +197,44 @@ class IRCBot:
         await self.send(f"USER {self.nickname} 0 * :{self.nickname}")
         await self.send(f"NICK {self.nickname}")
 
-    async def identify_with_nickserv(self):
-        motd_received = False
+    async def identify_with_sasl(self):
+        # Request SASL capability immediately upon connecting
+        await self.send("CAP REQ :sasl\r\n")
+        
         while True:
             data = await self.reader.read(2048)
             message = data.decode("UTF-8")
             print(message)
 
-            if "376" in message:  # End of MOTD
-                await self.send(f'PRIVMSG NickServ :IDENTIFY {self.nickname} {self.nickserv_password}\r\n')
-                print("Sent NickServ authentication.")  # End of MOTD
-                motd_received = True
+            match message:
+                case _ if f"CAP {self.nickname} ACK :sasl" in message:
+                    # Server supports SASL, proceed with authentication
+                    await self.send("AUTHENTICATE PLAIN\r\n")
+                
+                case _ if "AUTHENTICATE +" in message:
+                    # Server is ready for authentication data
+                    auth_string = f"{self.nickname}\0{self.nickname}\0{self.nickserv_password}"
+                    encoded_auth = base64.b64encode(auth_string.encode("UTF-8")).decode("UTF-8")
+                    await self.send(f"AUTHENTICATE {encoded_auth}\r\n")
+                
+                case _ if "903" in message:
+                    # SASL authentication successful
+                    await self.send("CAP END\r\n")
+                    print("SASL authentication successful.")
+                    for channel in self.channels:
+                        await self.join_channel(channel)
+                    print("Joined channels after SASL authentication.")
+                    break
+                
+                case _ if "904" in message or "905" in message:
+                    # SASL authentication failed
+                    print("SASL authentication failed.")
+                    break
 
-            if motd_received and "900" in message:  # NickServ authentication successful
-                for channel in self.channels:
-                    await self.join_channel(channel)
-                print("Joined channels after NickServ authentication.")
-                break
+                case _ if "PING" in message:
+                    # Respond to PINGs from the server
+                    split_message = message.split()
+                    await self.send(f"PONG {split_message[1]}")
 
     async def send(self, message):
         safe_msg = await self.sanitize_input(message)
@@ -395,19 +417,19 @@ class IRCBot:
                 MAX_FILE_SIZE = 256 * 1024 * 1024  # 256 MB
 
                 if content_type.startswith('image/'):
-                    await self.handle_image_url(url)
+                    return await self.handle_image_url(url)
                 elif content_type.startswith('video/'):
-                    await self.handle_video_file(url)
+                    return await self.handle_video_file(url)
                 elif content_type.startswith('text/plain'):
-                    await self.handle_text_file(url)
+                    return await self.handle_text_file(url)
                 elif content_type.startswith('audio/'):
-                    await self.handle_audio_file(url)
+                    return await self.handle_audio_file(url)
                 elif content_type == 'application/pdf':
-                    await self.handle_pdf_file(url)
+                    return await self.handle_pdf_file(url)
                 elif content_type == 'application/x-iso9660-image':
                     return "ISO"
                 elif content_type.startswith('text/html'):
-                    content = response.read(57344)
+                    content = response.read(10485760)
                     soup = BeautifulSoup(content, 'html.parser')
 
                     # Attempt to extract the og:title tag
@@ -422,17 +444,21 @@ class IRCBot:
                     # Determine which title to return
                     if og_title:
                         print(f"Extracted og:title: {og_title}")
-                        return og_title
+                        return f"[\x0303Website\x03] {og_title}"
                     elif title:
                         print(f"Extracted title tag: {title}")
-                        return title
+                        return f"[\x0303Website\x03] {title}"
                     else:
-                        return "Title not found"
+                        print(f"Title not found")
+                        e = f"extract_webpage_title could not find title for {url}"
+                        return self.handle_title_not_found(url, e) 
 
                 elif content_length > MAX_FILE_SIZE:
-                    return "Max Size"
+                    print(f"Max Size")
+                    return 
                 elif any(url.lower().endswith(ext) for ext in EXECUTABLE_FILE_EXTENSIONS):
-                    return "Banned File Type"
+                    print(f"Banned File Type")
+                    return 
                 else:
                     return
             else:
@@ -442,7 +468,7 @@ class IRCBot:
             response = self.handle_title_not_found(url, e)
             await self.send(f'PRIVMSG {channel} :{response}\r\n')
             print(f"Sent error response for URL: {url} to {channel}")
-            return "Error retrieving title"
+            return
         finally:
             connection.close()
 
@@ -505,7 +531,7 @@ class IRCBot:
         elif 'youtube.com' in url:
             return await self.process_youtube(url)
         else:
-            return await self.process_generic_url(url)
+            return await self.sanitize_input(await self.extract_webpage_title(url))
 
     async def process_youtube(self, url):
         try:
@@ -543,34 +569,6 @@ class IRCBot:
         crate_version = parts[-1]
 
         return f"[\x0303Webpage\x03] crates.io: Rust Package Registry: {crate_name}{crate_version}"
-
-    async def process_generic_url(self, url):
-        webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
-        print(f"webpage_title: {webpage_title}")
-
-        match webpage_title:
-            case "Title not found":
-                return self.handle_title_not_found(url, e=None)
-            case "Banned File Type":
-                print(f"Banned File Type")
-                return
-            case "ISO":
-                print(f"ISO")
-                return
-            case "Max Size":
-                print(f"Max Size")
-                return
-            case "Timeout retrieving title":
-                print(f"Timeout retrieving title")
-                return
-            case "Error retrieving title":
-                print(f"Error retrieving title")
-                return
-            case "Webpage not found":
-                print(f"Error 404 - not found")
-                return
-            case _:
-                return f"[\x0303Website\x03] {webpage_title}"
 
     def handle_title_not_found(self, url, e):
         site_name = url.split('/')[2]
@@ -1415,7 +1413,7 @@ class IRCBot:
             await self.connect()
 
             # Identify with NickServ
-            await self.identify_with_nickserv()
+            await self.identify_with_sasl()
             for channel in self.channels:
                 await self.join_channel(channel)
 
