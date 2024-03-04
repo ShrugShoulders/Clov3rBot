@@ -529,7 +529,7 @@ class IRCBot:
             return self.process_crates_url(url)
         elif hostname == 'twitter.com':
             return f"[\x0303Website\x03] X (formerly Twitter)"
-        elif hostname == 'youtube.com':
+        elif hostname == 'www.youtube.com':
             return await self.process_youtube(url)
         else:
             return await self.sanitize_input(await self.extract_webpage_title(url))
