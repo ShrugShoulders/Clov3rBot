@@ -1,4 +1,5 @@
 import asyncio
+import aiohttp
 import configparser
 import datetime
 import html
@@ -13,15 +14,17 @@ import requests
 import ssl
 import threading
 import time
+import http.client
+from urllib.parse import urlparse
 from requests.exceptions import HTTPError, Timeout, RequestException
 from PIL import Image
 from bs4 import BeautifulSoup
 from collections import deque
-from html import escape
+from html import escape, unescape
 from typing import Optional
 
 class IRCBot:
-    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None,channels_features=None):
+    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, channels_features=None, ignore_list_file=None):
         self.nickname = nickname
         self.channels_features = channels_features
         self.channels = channels if isinstance(channels, list) else [channels]
@@ -32,7 +35,7 @@ class IRCBot:
         self.admin_list = set(admin_list) if admin_list else set()
         self.last_messages = {channel: deque(maxlen=200) for channel in channels}
         self.mushroom_facts = []
-        self.ignore_list = ["sqtbot", "LitBot"]
+        self.ignore_list = []
         self.message_queue = {}
         self.last_seen = {}
         self.last_command_time = {}
@@ -43,7 +46,7 @@ class IRCBot:
         self.MIN_COMMAND_INTERVAL = 5
         self.lock = asyncio.Lock()
         self.url_regex = re.compile(r'https?://\S+')
-        self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.48'}
+        self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0', 'Accept-Encoding': 'identity'}
 
     @classmethod
     def from_config_file(cls, config_file, features_file='channels_features.json'):
@@ -87,6 +90,17 @@ class IRCBot:
                 print(f"Saved last messages to {filename}")
             except Exception as e:
                 print(f"Error saving last messages: {e}")
+
+    def load_ignore_list(self):
+        file_path = 'ignore_list.txt'
+        try:
+            with open(file_path, 'r') as file:
+                self.ignore_list = [line.strip() for line in file.readlines() if line.strip()]
+                print("Ignore List Loaded Successfully")
+        except FileNotFoundError:
+            print(f"Warning: Ignore list file '{file_path}' not found. Continuing with an empty ignore list.")
+        except Exception as e:
+            print(f"Error loading ignore list from '{file_path}': {e}")
 
     async def load_last_messages(self, filename="messages.json"):
         # Ensure the function is thread-safe if called concurrently
@@ -194,7 +208,7 @@ class IRCBot:
                 print("Sent NickServ authentication.")  # End of MOTD
                 motd_received = True
 
-            if motd_received and "396" in message:  # NickServ authentication successful
+            if motd_received and "900" in message:  # NickServ authentication successful
                 for channel in self.channels:
                     await self.join_channel(channel)
                 print("Joined channels after NickServ authentication.")
@@ -346,111 +360,91 @@ class IRCBot:
 
         return False
 
-    async def extract_webpage_title(self, url):
+    async def extract_webpage_title(self, url, redirect_limit=10):
+        parsed_url = urlparse(url)
+        connection = http.client.HTTPConnection(parsed_url.netloc) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc)
+        EXECUTABLE_FILE_EXTENSIONS = ['.exe', '.dll', '.bat', '.jar', '.iso']
+
+        # Define headers with User-Agent
+        headers = self.headers
+
         try:
-            headers = {"User-Agent": "YourUserAgentStringHere"}
-            try:
-                # Initial attempt with a HEAD request
-                head_response = requests.head(url, headers=headers)
-                head_response.raise_for_status()
-            except HTTPError as e:
-                if e.response.status_code == 400:
-                    # Fallback to a GET request if HEAD request fails with a 400 error
-                    print("HEAD request failed with 400, falling back to GET request.")
-                    head_response = requests.get(url, headers=headers, stream=True)
-                    head_response.raise_for_status()
-                elif e.response.status_code == 405:
-                    # Fallback to a GET request if HEAD request fails with a 405 error
-                    print("HEAD request failed with 405, falling back to GET request.")
-                    head_response = requests.get(url, headers=headers, stream=True)
-                    head_response.raise_for_status()
+            # Include the headers in the request
+            connection.request("GET", parsed_url.path or '/', headers=headers)
+            response = connection.getresponse()
+
+            # Follow redirects if status code is 301 or 302, up to a limit
+            num_redirects = 0
+            while response.status in [301, 302] and num_redirects < redirect_limit:
+                num_redirects += 1
+                new_location = response.getheader('Location')
+                if not new_location:
+                    return "Error: No location for redirect"
+                parsed_url = urlparse(new_location)
+                connection = http.client.HTTPConnection(parsed_url.netloc) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc)
+                # Include the headers again for the new request after redirect
+                connection.request("GET", parsed_url.path or '/', headers=headers)
+                response = connection.getresponse()
+
+            if response.status in [400, 405, 403]:
+                print(f"GET request failed with {response.status}")
+                return "HTTP Error"
+            elif response.status == 200:
+                content_type = response.getheader('Content-Type', '').lower()
+                content_length = int(response.getheader('Content-Length', 0))
+                MAX_FILE_SIZE = 256 * 1024 * 1024  # 256 MB
+
+                if content_type.startswith('image/'):
+                    await self.handle_image_url(url)
+                elif content_type.startswith('video/'):
+                    await self.handle_video_file(url)
+                elif content_type.startswith('text/plain'):
+                    await self.handle_text_file(url)
+                elif content_type.startswith('audio/'):
+                    await self.handle_audio_file(url)
+                elif content_type == 'application/pdf':
+                    await self.handle_pdf_file(url)
+                elif content_type == 'application/x-iso9660-image':
+                    return "ISO"
+                elif content_type.startswith('text/html'):
+                    content = response.read(57344)
+                    soup = BeautifulSoup(content, 'html.parser')
+
+                    # Attempt to extract the og:title tag
+                    og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
+                    og_title = og_title_tag['content'].strip() if og_title_tag else None
+
+                    # Extract the <title> tag
+                    title_tag = soup.find('title')
+                    title = title_tag.text.strip() if title_tag else None
+                    print(f"{og_title}, {title_tag}")
+
+                    # Determine which title to return
+                    if og_title:
+                        print(f"Extracted og:title: {og_title}")
+                        return og_title
+                    elif title:
+                        print(f"Extracted title tag: {title}")
+                        return title
+                    else:
+                        return "Title not found"
+
+                elif content_length > MAX_FILE_SIZE:
+                    return "Max Size"
+                elif any(url.lower().endswith(ext) for ext in EXECUTABLE_FILE_EXTENSIONS):
+                    return "Banned File Type"
                 else:
-                    raise
-
-            # Get the content length from the headers
-            content_length = int(head_response.headers.get('Content-Length', 0))
-
-            # Check if the content type is an image, plain text, audio, or ISO file
-            content_type = head_response.headers.get('Content-Type', '').lower()
-
-            # Define the maximum file size allowed (in bytes)
-            MAX_FILE_SIZE = 256 * 1024 * 1024  # 256 MB
-
-            # Define the list of executable file extensions
-            EXECUTABLE_FILE_EXTENSIONS = ['.exe', '.dll', '.bat', '.jar', '.iso']
-
-            if content_type.startswith('image/'):
-                return "Image"
-            elif content_type.startswith('text/plain'):
-                # Handle plain text file
-                return "Plain text file"
-            elif content_type.startswith('audio/'):
-                return "Audio file"
-            elif content_type == 'application/x-iso9660-image':
-                return "ISO"
-            elif content_length > MAX_FILE_SIZE:
-                return "Max Size"
-            elif any(url.lower().endswith(ext) for ext in EXECUTABLE_FILE_EXTENSIONS):
-                return "Banned File Type"
+                    return
             else:
-                # Download the content and extract the webpage title
-                response = requests.get(url, headers=self.headers, timeout=(1.0, 0.5))
-                response.raise_for_status()
-                print(f"getting webpage title")
-
-                # Decode response content using appropriate encoding
-                encoding = response.encoding if 'charset' in response.headers.get('content-type', '').lower() else None
-                soup = BeautifulSoup(response.content, 'html.parser', from_encoding=encoding)
-
-                # Function to get a list of sanitized titles from meta tags
-                def get_meta_content(title_tag, meta_tags):
-                    # Extract title from title tag
-                    title_from_title_tag = title_tag.text.strip() if title_tag else None
-
-                    # Extract titles from meta tags
-                    titles_from_meta_tags = [meta_tag.attrs.get('content', '').strip() for meta_tag in meta_tags]
-
-                    # Combine and prioritize titles
-                    all_titles = [title_from_title_tag] + [title for title in titles_from_meta_tags if title]
-
-                    return all_titles
-
-                # Look for the first og:title meta tag, Twitter Card title, Dublin Core title,
-                # meta tag with name attribute set to "title", and the title tag directly in the head
-                og_title_tags = soup.find_all('meta', {'property': 'og:title'})
-                twitter_title_tags = soup.find_all('meta', {'name': 'twitter:title'})
-                dc_title_tags = soup.find_all('meta', {'name': 'DC.title'})
-                meta_name_title_tags = soup.find_all('meta', {'name': 'title'})
-                title_tag = soup.head.title
-
-                # Combine all meta tags
-                all_meta_tags = og_title_tags + twitter_title_tags + dc_title_tags + meta_name_title_tags
-
-                # Get all titles from title tag and meta tags
-                all_titles = get_meta_content(title_tag, all_meta_tags)
-
-                if all_titles:
-                    sanitized_titles = [html.unescape(title) for title in all_titles]
-                    title = sanitized_titles[0]
-                    print(f"Extracted title from meta tags and title tag: {title}")
-                    return title
-
-                # If none of the above tags are found
-                return "Title not found"
-
-        except requests.exceptions.Timeout:
-            print(f"Timeout retrieving webpage title for {url}")
-            return "Timeout retrieving title"
-        except requests.exceptions.HTTPError as http_err:
-            if http_err.response.status_code == 404:
-                print(f"Webpage not found (404) for {url}")
-                return "Webpage not found"
-            else:
-                print(f"HTTP error {http_err.response.status_code} for {url}: {http_err}")
-                return "Error retrieving title"
-        except requests.exceptions.RequestException as e:
+                return f"HTTP error {response.status}"
+        except http.client.HTTPException as e:
             print(f"Error retrieving webpage title for {url}: {e}")
+            response = self.handle_title_not_found(url, e)
+            await self.send(f'PRIVMSG {channel} :{response}\r\n')
+            print(f"Sent error response for URL: {url} to {channel}")
             return "Error retrieving title"
+        finally:
+            connection.close()
 
     def format_file_size(self, size_in_bytes):
         for unit in ['B', 'KB', 'MB', 'GB']:
@@ -489,6 +483,9 @@ class IRCBot:
 
             except Exception as e:
                 print(f"Error fetching or parsing URL: {e}")
+                response = self.handle_title_not_found(url, e)
+                await self.send(f'PRIVMSG {channel} :{response}\r\n')
+                print(f"Sent error response for URL: {url} to {channel}")
 
     async def extract_message_parts(self, message):
         sender = message.split('!')[0][1:]
@@ -497,37 +494,41 @@ class IRCBot:
         return sender, channel, content
 
     async def process_url(self, url):
-        if 'amazon.com' in url:
+        if 'www.amazon.com' in url:
             return self.process_amazon_url(url)
-        elif 'amazon.co.uk' in url:
+        elif 'www.amazon.co.uk' in url:
             return self.process_amazon_url(url)
         elif 'crates.io' in url:
             return self.process_crates_url(url)
-        elif 'bpa.st' in url:
-            return await self.process_bpa(url)
+        elif 'twitter.com' in url:
+            return f"[\x0303Website\x03] X (formerly Twitter)"
+        elif 'youtube.com' in url:
+            return await self.process_youtube(url)
         else:
             return await self.process_generic_url(url)
 
-    async def process_bpa(self, url):
+    async def process_youtube(self, url):
         try:
-            response = await self.fetch_bpa_st_site(url)
-            return await self.extract_webpage_title_from_bpa(response)
+            response = await self.fetch_youtube_title(url)
+            return await self.extract_webpage_title_from_youtube(response)
         except Exception as e:
-            print(f"Error processing bpa.st link: {e}")
+            print(f"Error processing YouTube link: {e}")
 
-    async def fetch_bpa_st_site(self, url):
+    async def fetch_youtube_title(self, url):
         try:
-            response = requests.get(url, headers=self.headers, timeout=(1.0, 0.5))
-            response.raise_for_status()
-            return response.content
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers, timeout=aiohttp.ClientTimeout(total=1.5)) as response:
+                    response.raise_for_status()
+                    return await response.text()
         except Exception as e:
-            raise Exception(f"Error fetching bpa.st site content: {e}")
+            raise Exception(f"Error fetching YouTube site content: {e}")
 
-    async def extract_webpage_title_from_bpa(self, html_content):
+    async def extract_webpage_title_from_youtube(self, html_content):
         soup = BeautifulSoup(html_content, 'html.parser')
-        title_tag = soup.head.title
-        if title_tag:
-            return f"[\x0303bpa.st\x03] {title_tag.text.strip()}"
+        og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
+        if og_title_tag and og_title_tag.has_attr('content'):
+            title = unescape(og_title_tag['content'].strip())
+            return f"[\x0303YouTube\x03] {title}"
         else:
             return "Title not found"
 
@@ -544,25 +545,12 @@ class IRCBot:
         return f"[\x0303Webpage\x03] crates.io: Rust Package Registry: {crate_name}{crate_version}"
 
     async def process_generic_url(self, url):
-        file_name = url.split("/")[-1]
-
-        if "." in file_name:
-            file_extension = file_name.split(".")[-1].lower()
-        else:
-            file_extension = None
-
         webpage_title = await self.sanitize_input(await self.extract_webpage_title(url))
         print(f"webpage_title: {webpage_title}")
 
         match webpage_title:
             case "Title not found":
-                return self.handle_title_not_found(url)
-            case "Image":
-                return await self.handle_image_url(url)
-            case "Audio file":
-                return await self.handle_audio_file(url)
-            case "Plain text file":
-                return await self.handle_text_file(url)
+                return self.handle_title_not_found(url, e=None)
             case "Banned File Type":
                 print(f"Banned File Type")
                 return
@@ -582,12 +570,58 @@ class IRCBot:
                 print(f"Error 404 - not found")
                 return
             case _:
-                return self.return_page_title(url, webpage_title)
+                return f"[\x0303Website\x03] {webpage_title}"
 
-    def handle_title_not_found(self, url):
+    def handle_title_not_found(self, url, e):
         site_name = url.split('/')[2]
         paste_code = url.split('/')[-1]
+        self.save_no_title(url, e)
         return f"[\x0304Title Not Found\x03] {site_name} paste: {paste_code}"
+
+    def save_no_title(self, url, e):
+        # Get the current datetime for the log entry
+        now = datetime.datetime.now()
+        log_entry = f"{now}: Title not found for URL: {url} {e}\n"
+
+        # Append the log entry to the file
+        with open("error_log.txt", "a") as log_file:
+            log_file.write(log_entry)
+
+    async def handle_pdf_file(self, url):
+        site_name = url.split('/')[2]
+        file_identifier = url.split('/')[-1]
+        # Make a HEAD request to get headers
+        response = requests.head(url)
+        
+        # Extract the Content-Length header, which contains the file size in bytes
+        pdf_size_bytes = response.headers.get('Content-Length')
+        
+        # If Content-Length header is present, format the file size
+        if pdf_size_bytes is not None:
+            pdf_size_bytes = int(pdf_size_bytes)  # Convert to integer
+            formatted_size = self.format_file_size(pdf_size_bytes)
+            response = f"[\x0313PDF file\x03] {site_name} {file_identifier}: {formatted_size}"
+            return response
+        else:
+            return f"[\x0304PDF file\x03] {site_name} {file_identifier}: Size Unknown"
+
+    async def handle_video_file(self, url):
+        site_name = url.split('/')[2]
+        paste_code = url.split('/')[-1]
+        # Make a HEAD request to get headers
+        response = requests.head(url)
+        
+        # Extract the Content-Length header, which contains the file size in bytes
+        video_size_bytes = response.headers.get('Content-Length')
+        
+        # If Content-Length header is present, format the file size
+        if video_size_bytes is not None:
+            video_size_bytes = int(video_size_bytes)  # Convert to integer
+            formatted_size = self.format_file_size(video_size_bytes)
+            response = f"[\x0307Video file\x03] {site_name} {paste_code}: {formatted_size}"
+            return response
+        else:
+            return f"[\x0304Video file\x03] {site_name} {paste_code}: Size Unknown"
 
     async def handle_image_url(self, url):
         site_name = url.split('/')[2]
@@ -646,10 +680,6 @@ class IRCBot:
             formatted_text_size = "unknown size"
 
         return response
-
-    def return_page_title(self, url, webpage_title):
-        # Directly return the webpage title
-        return f"[\x0303Website\x03] {webpage_title}"
 
     def get_available_commands(self, exclude_admin=True):
         # List all available commands (excluding admin commands by default)
@@ -895,7 +925,7 @@ class IRCBot:
 
         try:
             # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=")
+            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=KEYHERE")
             print("Geocoding response status code:", response.status_code)
             print("Geocoding response content:", response.content)
             
@@ -903,7 +933,6 @@ class IRCBot:
             if response.status_code == 200:
                 # Parse the JSON response
                 data = response.json()
-                print("Geocoding response data:", data)
                 
                 # Extract latitude and longitude from the first place_id
                 if data:
@@ -1012,11 +1041,13 @@ class IRCBot:
     async def reload_command(self, channel, sender):
         self.channels_features = {}
         self.mushroom_facts = []
+        self.ignore_list = []
         self.last_seen = {}
         self.load_channel_features()
         self.load_mushroom_facts()
         self.load_message_queue()
         self.load_last_seen()
+        self.load_ignore_list()
         response = f"PRIVMSG {channel} :{sender}, Clov3r Successfully Reloaded.\r\n"
         await self.send(response)
         print(f"Sent: {response} to {channel}")
@@ -1379,6 +1410,7 @@ class IRCBot:
             self.load_mushroom_facts()
             self.load_message_queue()
             self.load_last_seen()
+            self.load_ignore_list()
             await self.load_last_messages()
             await self.connect()
 
