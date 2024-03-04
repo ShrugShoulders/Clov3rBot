@@ -520,15 +520,16 @@ class IRCBot:
         return sender, channel, content
 
     async def process_url(self, url):
-        if 'www.amazon.com' in url:
+        parsed_url = urlparse(url)
+        hostname = parsed_url.hostname
+
+        if hostname in ['www.amazon.com', 'www.amazon.co.uk']:
             return self.process_amazon_url(url)
-        elif 'www.amazon.co.uk' in url:
-            return self.process_amazon_url(url)
-        elif 'crates.io' in url:
+        elif hostname == 'crates.io':
             return self.process_crates_url(url)
-        elif 'twitter.com' in url:
+        elif hostname == 'twitter.com':
             return f"[\x0303Website\x03] X (formerly Twitter)"
-        elif 'youtube.com' in url:
+        elif hostname == 'youtube.com':
             return await self.process_youtube(url)
         else:
             return await self.sanitize_input(await self.extract_webpage_title(url))
@@ -923,7 +924,7 @@ class IRCBot:
 
         try:
             # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=KEYHERE")
+            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=YOURKEY")
             print("Geocoding response status code:", response.status_code)
             print("Geocoding response content:", response.content)
             
