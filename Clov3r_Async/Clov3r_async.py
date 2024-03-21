@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 from collections import deque
 from html import escape, unescape
 from typing import Optional
+from title_scrape import Titlescraper
 
 class IRCBot:
     def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, channels_features=None, ignore_list_file=None):
@@ -40,6 +41,7 @@ class IRCBot:
         self.message_queue = {}
         self.last_seen = {}
         self.last_command_time = {}
+        self.processed_urls = {}
         self.reader = None
         self.writer = None
         self.last_issued_command = None
@@ -196,11 +198,27 @@ class IRCBot:
 
         await self.send(f"USER {self.nickname} 0 * :{self.nickname}")
         await self.send(f"NICK {self.nickname}")
+        await self.wait_for_motd()
+
+    async def wait_for_motd(self):
+        print("Waiting for MOTD to complete...")
+        while True:
+            data = await self.reader.read(2048)
+            message = data.decode("UTF-8")
+            print(message)
+            if "376" in message or "422" in message:  # MOTD End or No MOTD
+                print("MOTD complete. Proceeding with SASL authentication.")
+                await self.identify_with_sasl()
+                break
+            elif "PING" in message:
+                # Respond to PINGs from the server to stay connected
+                split_message = message.split()
+                await self.send(f"PONG {split_message[1]}")
 
     async def identify_with_sasl(self):
         # Request SASL capability immediately upon connecting
         await self.send("CAP REQ :sasl\r\n")
-        
+
         while True:
             data = await self.reader.read(2048)
             message = data.decode("UTF-8")
@@ -210,13 +228,13 @@ class IRCBot:
                 case _ if f"CAP {self.nickname} ACK :sasl" in message:
                     # Server supports SASL, proceed with authentication
                     await self.send("AUTHENTICATE PLAIN\r\n")
-                
+
                 case _ if "AUTHENTICATE +" in message:
                     # Server is ready for authentication data
                     auth_string = f"{self.nickname}\0{self.nickname}\0{self.nickserv_password}"
                     encoded_auth = base64.b64encode(auth_string.encode("UTF-8")).decode("UTF-8")
                     await self.send(f"AUTHENTICATE {encoded_auth}\r\n")
-                
+
                 case _ if "903" in message:
                     # SASL authentication successful
                     await self.send("CAP END\r\n")
@@ -225,7 +243,7 @@ class IRCBot:
                         await self.join_channel(channel)
                     print("Joined channels after SASL authentication.")
                     break
-                
+
                 case _ if "904" in message or "905" in message:
                     # SASL authentication failed
                     print("SASL authentication failed.")
@@ -250,6 +268,13 @@ class IRCBot:
                 await self.send("PING :keepalive")
                 print(f"Sent: PING to Server: {self.server}")
             await asyncio.sleep(195)
+
+    async def clear_urls(self):
+        while True:
+            async with self.lock:
+                self.processed_urls = {}
+                print(f"Cleared URLS")
+            await asyncio.sleep(600)
 
     async def save_message(self, sender, content, channel):
         # Use system's current time for Unix timestamp
@@ -288,7 +313,7 @@ class IRCBot:
 
             while '\n' in buffer:
                 line, buffer = buffer.split('\n', 1)
-                line = line.rstrip('\r')
+                line = line.rstrip('\r').strip().lstrip()
 
                 if not line:
                     continue
@@ -296,33 +321,35 @@ class IRCBot:
                 tokens = irctokens.tokenise(line)
 
                 if tokens.command == "PING":
-                    await self.send(f"PONG {tokens.params[0]}")
+                    await self.send(f"PONG {tokens.params[0].strip().lstrip()}")
                 elif tokens.command == "PRIVMSG":
-                    sender = tokens.source.split('!')[0] if tokens.source else "Unknown Sender"
-                    hostmask = tokens.source if tokens.source else "Unknown Hostmask"
-                    channel = tokens.params[0]
-                    content = tokens.params[1]
+                    sender = tokens.source.split('!')[0].strip().lstrip() if tokens.source else "Unknown Sender"
+                    hostmask = tokens.source.strip() if tokens.source else "Unknown Hostmask"
+                    channel = tokens.params[0].strip().lstrip()
+                    content = tokens.params[1].strip().lstrip()
+                    parts = content.split()
+                    normalized_content = ' '.join(parts)
 
                     if sender in self.ignore_list:
                         print(f"Ignored message from {sender}")
                         continue
 
-                    await self.save_message(sender, content, channel)
+                    await self.save_message(sender, normalized_content, channel)
                     await self.send_saved_messages(sender, channel)
 
-                    if await self.handle_channel_features(channel, '.record'):
-                        await self.record_last_seen(sender, channel, content)
+                    if await self.handle_channel_features(channel, '.record'.strip().lstrip()):
+                        await self.record_last_seen(sender, channel, normalized_content)
                         self.save_last_seen()
 
-                    if await self.handle_channel_features(channel, '.usercommands'):
-                        await self.user_commands(sender, channel, content, hostmask)
+                    if await self.handle_channel_features(channel, '.usercommands'.strip().lstrip()):
+                        await self.user_commands(sender, channel, normalized_content, hostmask)
 
-                    if await self.handle_channel_features(channel, '.urlparse'):
-                        await self.detect_and_parse_urls(line)
+                    if await self.handle_channel_features(channel, '.urlparse'.strip().lstrip()):
+                        await self.detect_and_parse_urls(sender, channel, normalized_content)
                 elif tokens.command == "332":  # TOPIC message
                     if self.topic_command == True:
-                        topic = tokens.params[2]
-                        channel = tokens.params[1]
+                        topic = tokens.params[2].strip().lstrip()
+                        channel = tokens.params[1].strip().lstrip()
                         print(f"{topic}")
                         if topic:
                             response = f"PRIVMSG {channel} :{topic}\r\n"
@@ -382,106 +409,8 @@ class IRCBot:
 
         return False
 
-    async def extract_webpage_title(self, url, redirect_limit=10):
-        parsed_url = urlparse(url)
-        connection = http.client.HTTPConnection(parsed_url.netloc) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc)
-        EXECUTABLE_FILE_EXTENSIONS = ['.exe', '.dll', '.bat', '.jar', '.iso']
-
-        # Define headers with User-Agent
-        headers = self.headers
-
-        try:
-            # Include the headers in the request
-            connection.request("GET", parsed_url.path or '/', headers=headers)
-            response = connection.getresponse()
-
-            # Follow redirects if status code is 301 or 302, up to a limit
-            num_redirects = 0
-            while response.status in [301, 302] and num_redirects < redirect_limit:
-                num_redirects += 1
-                new_location = response.getheader('Location')
-                if not new_location:
-                    return "Error: No location for redirect"
-                parsed_url = urlparse(new_location)
-                connection = http.client.HTTPConnection(parsed_url.netloc) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc)
-                # Include the headers again for the new request after redirect
-                connection.request("GET", parsed_url.path or '/', headers=headers)
-                response = connection.getresponse()
-
-            if response.status in [400, 405, 403]:
-                print(f"GET request failed with {response.status}")
-                return "HTTP Error"
-            elif response.status == 200:
-                content_type = response.getheader('Content-Type', '').lower()
-                content_length = int(response.getheader('Content-Length', 0))
-                MAX_FILE_SIZE = 256 * 1024 * 1024  # 256 MB
-
-                if content_type.startswith('image/'):
-                    return await self.handle_image_url(url)
-                elif content_type.startswith('video/'):
-                    return await self.handle_video_file(url)
-                elif content_type.startswith('text/plain'):
-                    return await self.handle_text_file(url)
-                elif content_type.startswith('audio/'):
-                    return await self.handle_audio_file(url)
-                elif content_type == 'application/pdf':
-                    return await self.handle_pdf_file(url)
-                elif content_type == 'application/x-iso9660-image':
-                    return "ISO"
-                elif content_type.startswith('text/html'):
-                    content = response.read(10485760)
-                    soup = BeautifulSoup(content, 'html.parser')
-
-                    # Attempt to extract the og:title tag
-                    og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
-                    og_title = og_title_tag['content'].strip() if og_title_tag else None
-
-                    # Extract the <title> tag
-                    title_tag = soup.find('title')
-                    title = title_tag.text.strip() if title_tag else None
-                    print(f"{og_title}, {title_tag}")
-
-                    # Determine which title to return
-                    if og_title:
-                        print(f"Extracted og:title: {og_title}")
-                        return f"[\x0303Website\x03] {og_title}"
-                    elif title:
-                        print(f"Extracted title tag: {title}")
-                        return f"[\x0303Website\x03] {title}"
-                    else:
-                        print(f"Title not found")
-                        e = f"extract_webpage_title could not find title for {url}"
-                        return self.handle_title_not_found(url, e) 
-
-                elif content_length > MAX_FILE_SIZE:
-                    print(f"Max Size")
-                    return 
-                elif any(url.lower().endswith(ext) for ext in EXECUTABLE_FILE_EXTENSIONS):
-                    print(f"Banned File Type")
-                    return 
-                else:
-                    return
-            else:
-                return f"HTTP error {response.status}"
-        except http.client.HTTPException as e:
-            print(f"Error retrieving webpage title for {url}: {e}")
-            response = self.handle_title_not_found(url, e)
-            await self.send(f'PRIVMSG {channel} :{response}\r\n')
-            print(f"Sent error response for URL: {url} to {channel}")
-            return
-        finally:
-            connection.close()
-
-    def format_file_size(self, size_in_bytes):
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size_in_bytes < 1024.0:
-                return f"{size_in_bytes:.2f} {unit}"
-            size_in_bytes /= 1024.0
-
-        return f"{size_in_bytes:.2f} TB"
-
-    async def detect_and_parse_urls(self, message):
-        sender, channel, content = await self.extract_message_parts(message)
+    async def detect_and_parse_urls(self, sender, channel, content):
+        titlescrape = Titlescraper()
 
         urls = self.url_regex.findall(content)
 
@@ -494,7 +423,12 @@ class IRCBot:
                     print(f"Ignoring URL with private IP address: {url}")
                     continue
 
-                response = await self.process_url(url)
+                # Check if the URL has already been processed for the current channel
+                if url in self.processed_urls and channel in self.processed_urls[url]:
+                    print(f"URL already processed for this channel: {url}")
+                    continue
+
+                response = await titlescrape.process_url(url)
 
                 if response is None:
                     return
@@ -503,182 +437,19 @@ class IRCBot:
                 await self.send(f'PRIVMSG {channel} :{response}\r\n')
                 print(f"Sent: {response} to {channel}")
 
+                # Update the dictionary with the processed URL and channel
+                if url not in self.processed_urls:
+                    self.processed_urls[url] = set()
+                self.processed_urls[url].add(channel)
+
             except requests.exceptions.Timeout:
                 print(f"Timeout processing URL: {url}")
                 continue
 
             except Exception as e:
                 print(f"Error fetching or parsing URL: {e}")
-                response = self.handle_title_not_found(url, e)
-                await self.send(f'PRIVMSG {channel} :{response}\r\n')
-                print(f"Sent error response for URL: {url} to {channel}")
-
-    async def extract_message_parts(self, message):
-        sender = message.split('!')[0][1:]
-        channel = message.split('PRIVMSG')[1].split(':')[0].strip()
-        content = message.split('PRIVMSG')[1].split(':', 1)[1].strip()
-        return sender, channel, content
-
-    async def process_url(self, url):
-        parsed_url = urlparse(url)
-        hostname = parsed_url.hostname
-
-        if hostname in ['www.amazon.com', 'www.amazon.co.uk']:
-            return self.process_amazon_url(url)
-        elif hostname == 'crates.io':
-            return self.process_crates_url(url)
-        elif hostname == 'twitter.com':
-            return f"[\x0303Website\x03] X (formerly Twitter)"
-        elif hostname == 'www.youtube.com':
-            return await self.process_youtube(url)
-        else:
-            return await self.sanitize_input(await self.extract_webpage_title(url))
-
-    async def process_youtube(self, url):
-        try:
-            response = await self.fetch_youtube_title(url)
-            return await self.extract_webpage_title_from_youtube(response)
-        except Exception as e:
-            print(f"Error processing YouTube link: {e}")
-
-    async def fetch_youtube_title(self, url):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self.headers, timeout=aiohttp.ClientTimeout(total=1.5)) as response:
-                    response.raise_for_status()
-                    return await response.text()
-        except Exception as e:
-            raise Exception(f"Error fetching YouTube site content: {e}")
-
-    async def extract_webpage_title_from_youtube(self, html_content):
-        soup = BeautifulSoup(html_content, 'html.parser')
-        og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
-        if og_title_tag and og_title_tag.has_attr('content'):
-            title = unescape(og_title_tag['content'].strip())
-            return f"[\x0303YouTube\x03] {title}"
-        else:
-            return "Title not found"
-
-    def process_amazon_url(self, url):
-        product_name = " ".join(url.split('/')[3].split('-')).title()
-        return f"[\x0303Amazon\x03] Product: {product_name}"
-
-    def process_crates_url(self, url):
-        # Extract the crate name and version from the URL
-        parts = url.split('/')
-        crate_name = parts[-2]
-        crate_version = parts[-1]
-
-        return f"[\x0303Webpage\x03] crates.io: Rust Package Registry: {crate_name}{crate_version}"
-
-    def handle_title_not_found(self, url, e):
-        site_name = url.split('/')[2]
-        paste_code = url.split('/')[-1]
-        self.save_no_title(url, e)
-        return f"[\x0304Title Not Found\x03] {site_name} paste: {paste_code}"
-
-    def save_no_title(self, url, e):
-        # Get the current datetime for the log entry
-        now = datetime.datetime.now()
-        log_entry = f"{now}: Title not found for URL: {url} {e}\n"
-
-        # Append the log entry to the file
-        with open("error_log.txt", "a") as log_file:
-            log_file.write(log_entry)
-
-    async def handle_pdf_file(self, url):
-        site_name = url.split('/')[2]
-        file_identifier = url.split('/')[-1]
-        # Make a HEAD request to get headers
-        response = requests.head(url)
-        
-        # Extract the Content-Length header, which contains the file size in bytes
-        pdf_size_bytes = response.headers.get('Content-Length')
-        
-        # If Content-Length header is present, format the file size
-        if pdf_size_bytes is not None:
-            pdf_size_bytes = int(pdf_size_bytes)  # Convert to integer
-            formatted_size = self.format_file_size(pdf_size_bytes)
-            response = f"[\x0313PDF file\x03] {site_name} {file_identifier}: {formatted_size}"
-            return response
-        else:
-            return f"[\x0304PDF file\x03] {site_name} {file_identifier}: Size Unknown"
-
-    async def handle_video_file(self, url):
-        site_name = url.split('/')[2]
-        paste_code = url.split('/')[-1]
-        # Make a HEAD request to get headers
-        response = requests.head(url)
-        
-        # Extract the Content-Length header, which contains the file size in bytes
-        video_size_bytes = response.headers.get('Content-Length')
-        
-        # If Content-Length header is present, format the file size
-        if video_size_bytes is not None:
-            video_size_bytes = int(video_size_bytes)  # Convert to integer
-            formatted_size = self.format_file_size(video_size_bytes)
-            response = f"[\x0307Video file\x03] {site_name} {paste_code}: {formatted_size}"
-            return response
-        else:
-            return f"[\x0304Video file\x03] {site_name} {paste_code}: Size Unknown"
-
-    async def handle_image_url(self, url):
-        site_name = url.split('/')[2]
-        paste_code = url.split('/')[-1]
-
-        try:
-            image_response = requests.get(url, headers=self.headers)
-            image_size_bytes = len(image_response.content)
-            formatted_image_size = self.format_file_size(image_size_bytes)
-
-            # Use Pillow to get image dimensions
-            image = Image.open(io.BytesIO(image_response.content))
-            width, height = image.size
-            image_dimensions = f"{width}x{height}"
-
-        except Exception as e:
-            print(f"Error fetching image size: {e}")
-            formatted_image_size = "unknown size"
-            image_dimensions = "N/A"
-
-        return f"[\x0311Image File\x03] {site_name} {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
-
-    async def handle_audio_file(self, url):
-        # Handle the case where it's an audio file.
-        site_name = url.split('/')[2]
-        paste_code = url.split('/')[-1]
-
-        # Initialize the response variable with a default value
-        response = f"[\x0307Audio File\x03] {site_name} (Audio) {paste_code} - Size: unknown size"
-
-        try:
-            audio_response = requests.get(url, headers=self.headers, stream=True)
-            audio_size_bytes = int(audio_response.headers.get('Content-Length', 0))
-
-            formatted_audio_size = self.format_file_size(audio_size_bytes)
-            response = f"[\x0307Audio File\x03] {site_name} {paste_code} - Size: {formatted_audio_size}"
-        except Exception as e:
-            print(f"Error fetching audio size: {e}")
-
-        return response
-
-    async def handle_text_file(self, url):
-        # Handle the case where it's a plain text file.
-        site_name = url.split('/')[2]
-        paste_code = url.split('/')[-1]
-
-        # Get the text file size using a GET request
-        try:
-            text_response = requests.get(url, headers=self.headers)
-            text_size_bytes = len(text_response.content)
-
-            formatted_text_size = self.format_file_size(text_size_bytes)
-            response = f"[\x0313Text File\x03] {site_name} {paste_code} - Size: {formatted_text_size}"
-        except Exception as e:
-            print(f"Error fetching text file size: {e}")
-            formatted_text_size = "unknown size"
-
-        return response
+                titlescrape.handle_title_not_found(url, e)
+                continue
 
     def get_available_commands(self, exclude_admin=True):
         # List all available commands (excluding admin commands by default)
@@ -699,6 +470,7 @@ class IRCBot:
             ".version",
             ".sed",
             ".weather",
+            ".color",
             ".admin",
         ]
         if exclude_admin:
@@ -722,8 +494,9 @@ class IRCBot:
             ".rollover": "Rollover command: Woof woof!",
             ".stats": "Stats command: Display statistics for a user. Use '.stats <user>'.",
             ".version": "Version command: Shows the version of Clov3r",
-            ".sed": "Sed usage s/change_this/to_this/(g/i). Flags are optional. To include word boundaries use \\b Example: s/\\btest\\b/stuff. I can also take regex.",
+            ".sed": "Sed usage s/change_this/to_this/(g/i). Flags are optional. To include word boundaries use \\b Example: s/\\btest\\b/stuff. I can also take regex. https://tinyurl.com/sedinfo",
             ".weather": "Search weather forecast - example: .weather Ireland - Can search by address or other terms",
+            ".color": "The Colors command takes either r,g,b values or hex #000000",
             ".admin": ".factadd - .quit - .join - .part - .op - .deop - .botop - .reload - .purge",
         }
 
@@ -785,7 +558,7 @@ class IRCBot:
                     if time_elapsed < self.MIN_COMMAND_INTERVAL:
                         return
 
-                command = content.split()[0]
+                command = content.split()[0].strip()
                 args = content[len(command):].strip()
 
                 if await self.handle_channel_features(channel, command):
@@ -796,6 +569,37 @@ class IRCBot:
                             self.last_command_time[sender] = time.time()
                             response = f"PRIVMSG {channel} :[\x0303Ping\x03] {sender}: PNOG!"
                             await self.send(response)
+
+                        case '.color':
+                            self.last_command_time[sender] = time.time()
+                            input_value = args.strip()
+
+                            # Strip out the '#' if it's present
+                            if input_value.startswith('#'):
+                                input_value = input_value[1:]
+
+                            # Check if input is in RGB decimal format
+                            if ',' in input_value:
+                                try:
+                                    rgb_values = [int(x) for x in input_value.split(',')]
+                                    if len(rgb_values) == 3 and all(0 <= x <= 255 for x in rgb_values):
+                                        # Convert RGB to hex
+                                        color_code = ''.join(f'{x:02x}' for x in rgb_values)
+                                    else:
+                                        raise ValueError
+                                except ValueError:
+                                    response = f"PRIVMSG {channel} :Invalid RGB format. Please use the format R,G,B where R, G, and B are between 0 and 255."
+                                    await self.send(response)
+                                    return
+                            else:
+                                color_code = input_value
+
+                            # Validate hex color code
+                            if len(color_code) == 6 and all(c in '0123456789abcdefABCDEF' for c in color_code):
+                                await self.get_color_info(color_code, channel)
+                            else:
+                                response = f"PRIVMSG {channel} :Invalid color code format. Please use a 6-digit hexadecimal code or R,G,B format."
+                                await self.send(response)
 
                         case '.weather':
                             self.last_command_time[sender] = time.time()
@@ -917,6 +721,24 @@ class IRCBot:
                         case '.purge' if hostmask in self.admin_list:
                             await self.purge_message_queue(channel, sender)
 
+    async def get_color_info(self, color_code, channel):
+        url = f"https://www.color-hex.com/color/{color_code}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    # Assuming the title tag contains the color name/description
+                    title = soup.title.string if soup.title else 'Unknown Color' #soup.find('title')
+                    
+                    # Construct the response message with the title and URL
+                    response_message = f"Color information for {color_code} ({title}): {url}"
+                else:
+                    response_message = "Failed to retrieve color information."
+        
+        await self.send(f"PRIVMSG {channel} :{response_message}")
+
     async def geocode_location(self, location):
         # If the location is empty, return None
         if not location:
@@ -924,7 +746,7 @@ class IRCBot:
 
         try:
             # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=YOURKEY")
+            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=65b583605ab6a403481192yza5a9247")
             print("Geocoding response status code:", response.status_code)
             print("Geocoding response content:", response.content)
             
@@ -950,7 +772,7 @@ class IRCBot:
 
     async def get_weather(self, location, channel):
         # Set your user agent
-        user_agent = "Clov3r_forecast, your@email.com"
+        user_agent = "Clov3r_forecast, connorkim.kim3@gmail.com"
 
         # Get latitude and longitude from geocoding
         lat, lon = await self.geocode_location(location)
@@ -1310,7 +1132,7 @@ class IRCBot:
     async def handle_sed_command(self, channel, sender, content):
         try:
             match = re.match(r'[sS]/(.*?)/(.*?)(?:/([gi]*))?(/(\d*))?(?:/(.*))?$', content.replace(r'\/', '__SLASH__'))
-            character_limit = 256
+            character_limit = 460
             if match:
                 old, new, flags, _, occurrence, target_nickname = match.groups()  # Adjusted unpacking to match the new group structure
                 flags = flags if flags else ''  # Ensure flags are set to an empty string if not provided
@@ -1413,17 +1235,13 @@ class IRCBot:
             await self.load_last_messages()
             await self.connect()
 
-            # Identify with NickServ
-            await self.identify_with_sasl()
-            for channel in self.channels:
-                await self.join_channel(channel)
-
             keep_alive_task = asyncio.create_task(self.keep_alive())
             handle_messages_task = asyncio.create_task(self.handle_messages())
+            clear_urls_task = asyncio.create_task(self.clear_urls())
 
             # Wait for either of the tasks to finish
             done, pending = await asyncio.wait(
-                [keep_alive_task, handle_messages_task],
+                [keep_alive_task, handle_messages_task, clear_urls_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
 
