@@ -5,6 +5,7 @@ def get_bug_details(args):
     bug_id = bug_args[0]
     action_list = ['change', 'creation']
     search_term = None
+    action = None
     occurrence = 1
 
     # Check if there's a second argument and determine if it's an action or search term
@@ -54,25 +55,32 @@ def get_bug_details(args):
 
 def search_bug_data(bug, term, occurrence=1):
     """
-    Searches the bug's data for the given term, aiming for an exact key match,
-    and returns the value of the specified occurrence directly.
+    Searches the bug's data for the given term, aiming for an exact or partial key match,
+    and returns the value of the specified occurrence directly. Prioritizes exact matches.
     """
     term = term.lower()  # Case-insensitive search
-    matches = []
+    exact_matches = []
+    partial_matches = []
 
     def search_recursive(data):
         if isinstance(data, dict):
             for key, value in data.items():
+                key_lower = key.lower()
                 # Check for an exact match with the key
-                if term == key.lower():
-                    matches.append(value)  # Collect the match
-                else:
-                    search_recursive(value)  # Recursive search within the value
+                if term == key_lower:
+                    exact_matches.append(value)  # Collect the exact match
+                elif term in key_lower:
+                    partial_matches.append(value)  # Collect the partial match
+                # Recursive search within the value
+                search_recursive(value)
         elif isinstance(data, list):
             for item in data:
                 search_recursive(item)
 
     search_recursive(bug)
+
+    # Determine which list to use based on the availability of exact matches
+    matches = exact_matches if exact_matches else partial_matches
 
     # Check if the specified occurrence is within the range of found matches
     if 0 < occurrence <= len(matches):
