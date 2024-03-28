@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+import socket
 import re
 import requests
 import ipaddress
@@ -8,6 +9,7 @@ import http.client
 import datetime
 import io
 import os
+import magic
 from html import escape, unescape
 from requests.exceptions import HTTPError, Timeout, RequestException
 from urllib.parse import urlparse
@@ -17,7 +19,6 @@ from PIL import Image
 class Titlescraper:
     def __init__(self):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0', 'Accept-Encoding': 'identity'}
-        self.url_regex = re.compile(r'https?://\S+')
 
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
@@ -45,8 +46,9 @@ class Titlescraper:
         return False
 
     async def extract_webpage_title(self, url, redirect_limit=25):
+        REQUEST_TIMEOUT = 10
         parsed_url = urlparse(url)
-        connection = http.client.HTTPConnection(parsed_url.netloc) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc)
+        connection = http.client.HTTPConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT)
         EXECUTABLE_FILE_EXTENSIONS = ['.exe', '.dll', '.bat', '.jar', '.iso']
 
         # Define headers with User-Agent
@@ -76,7 +78,15 @@ class Titlescraper:
                 self.save_no_title(url, e)
                 return
             elif response.status == 200:
-                content_type = response.getheader('Content-Type', '').lower()
+                content_bytes = response.read(2048)
+                content_type = magic.from_buffer(content_bytes, mime=True)
+                print(f"{content_type}")
+                
+                if content_type in ['application/octet-stream', 'application/zip']:
+                    if url.endswith(('.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.mha', '.mhm', '.aiff', '.alac', '.opus', '.spx', '.amr', '.ac3', '.dsf', '.dff', '.ape')):
+                        return await self.handle_audio_file(url)
+
+                #content_type = response.getheader('Content-Type', '').lower()
                 charset = 'utf-8'
                 if 'charset' in content_type.lower():
                     charset = charset = content_type.split('charset=')[-1].split(';')[0]
@@ -98,35 +108,36 @@ class Titlescraper:
                 elif content_type == 'application/x-iso9660-image':
                     return "ISO"
                 elif content_type.startswith('text/html'):
-                    content = response.read()
-                    decoded_content = content.decode(charset, errors='ignore')
+                    remaining_content_bytes = response.read()
+                    full_content = content_bytes + remaining_content_bytes
+                    
+                    decoded_content = full_content.decode('utf-8', errors='ignore')
                     soup = BeautifulSoup(decoded_content, 'html.parser')
 
-                    # Attempt to extract the og:title tag
-                    og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
-                    og_title = og_title_tag['content'].strip() if og_title_tag else None
-
-                    meta_name_title_tag = soup.find('meta', {'name': 'title'})
-                    meta_name_title = meta_name_title_tag['content'].strip() if meta_name_title_tag else None
-
-                    # Extract the <title> tag, also consider additional attributes like data-react-helmet
                     title_tag = soup.find('title')
-                    title = title_tag.text.strip() if title_tag else None
+                    title = title_tag.text if title_tag else None
 
-                    # Determine which title to return
-                    if og_title:
-                        print(f"Extracted og:title: {og_title}")
-                        return f"[\x0303Website\x03] {og_title}"
-                    elif meta_name_title:
-                        print(f"Extracted meta name=title: {meta_name_title}")
-                        return f"[\x0303Website\x03] {meta_name_title}"
-                    elif title:
+                    if title:
                         print(f"Extracted title tag: {title}")
                         return f"[\x0303Website\x03] {title}"
                     else:
-                        print(f"Title not found")
-                        e = f"extract_webpage_title could not find title for {url}"
-                        self.handle_title_not_found(url, e)
+                        meta_name_title_tag = soup.find('meta', {'name': 'title'})
+                        meta_name_title = meta_name_title_tag['content'] if meta_name_title_tag else None
+
+                        if meta_name_title:
+                            print(f"Extracted meta name=title: {meta_name_title}")
+                            return f"[\x0303Website\x03] {meta_name_title}"
+                        else:
+                            og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
+                            og_title = og_title_tag['content'] if og_title_tag else None
+
+                            if og_title:
+                                print(f"Extracted og:title: {og_title}")
+                                return f"[\x0303Website\x03] {og_title}"
+                            else:
+                                print(f"Title not found")
+                                e = f"extract_webpage_title could not find title for {url}"
+                                self.handle_title_not_found(url, e)
 
                 elif content_length > MAX_FILE_SIZE:
                     print(f"Max Size")
@@ -138,9 +149,12 @@ class Titlescraper:
                     return
             else:
                 return
+        except socket.timeout:
+            print(f"Request timed out for {url}")
+            # Handle the timeout appropriately, maybe by logging or notifying the user
         except http.client.HTTPException as e:
             print(f"Error retrieving webpage title for {url}: {e}")
-            self.handle_title_not_found(url, e)
+            # Handle other HTTP exceptions as before
         finally:
             connection.close()
 
@@ -151,6 +165,22 @@ class Titlescraper:
             size_in_bytes /= 1024.0
 
         return f"{size_in_bytes:.2f} TB"
+
+    async def process_reddit_url(self, url):
+        try:
+            response = requests.get(url, headers=self.headers)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                title_tag = soup.find('title')
+                if title_tag:
+                    return f"[\x0303Website\x03] {title_tag.text}"
+                else:
+                    return "Title not found"
+            else:
+                print(f"Error: Response status {response.status_code}")
+                return
+        except Exception as e:
+            return f"Error: {str(e)}"
 
     async def process_url(self, url):
         parsed_url = urlparse(url)
@@ -164,6 +194,12 @@ class Titlescraper:
             return f"[\x0303Website\x03] X (formerly Twitter)"
         elif hostname in ['www.youtube.com', 'youtube.com', 'youtu.be']:
             return await self.process_youtube(url)
+        elif hostname in ['reddit.com', 'www.reddit.com']:
+            old_reddit_url = url.replace(hostname, 'old.reddit.com')
+            return await self.process_reddit_url(old_reddit_url)
+        elif hostname == 'dpaste.com':
+            raw_text_url = f"{url}.txt" if not url.endswith('.txt') else url
+            return await self.sanitize_input(await self.extract_webpage_title(raw_text_url))
         else:
             return await self.sanitize_input(await self.extract_webpage_title(url))
 
@@ -188,7 +224,7 @@ class Titlescraper:
         og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
         if og_title_tag and og_title_tag.has_attr('content'):
             title = unescape(og_title_tag['content'].strip())
-            return f"[\x0303YouTube\x03] {title}"
+            return f"[\x0301,00\x02You\x0300,04\x02Tube\x03] {title}"
         else:
             return "Title not found"
 
@@ -219,20 +255,43 @@ class Titlescraper:
     async def handle_pdf_file(self, url):
         site_name = url.split('/')[2]
         file_identifier = url.split('/')[-1]
+
+        # Determine the script directory and pdfs directory
+        script_directory = os.path.dirname(os.path.abspath(__file__))
+        pdfs_directory = os.path.join(script_directory, "pdfs")
+        
+        # Ensure the pdfs directory exists
+        if not os.path.exists(pdfs_directory):
+            os.makedirs(pdfs_directory)
+
         # Make a HEAD request to get headers
-        response = requests.head(url)
-        
+        head_response = requests.head(url)
+
         # Extract the Content-Length header, which contains the file size in bytes
-        pdf_size_bytes = response.headers.get('Content-Length')
-        
+        pdf_size_bytes = head_response.headers.get('Content-Length')
+
         # If Content-Length header is present, format the file size
         if pdf_size_bytes is not None:
             pdf_size_bytes = int(pdf_size_bytes)  # Convert to integer
             formatted_size = self.format_file_size(pdf_size_bytes)
-            response = f"[\x0313PDF file\x03] {site_name} {file_identifier}: {formatted_size}"
-            return response
+            
+            try:
+                # Download the PDF content with a GET request
+                pdf_response = requests.get(url, stream=True)
+
+                # Save the PDF file to the pdfs directory
+                pdf_path = os.path.join(pdfs_directory, file_identifier)
+                with open(pdf_path, "wb") as pdf_file:
+                    for chunk in pdf_response.iter_content(chunk_size=8192):
+                        pdf_file.write(chunk)
+
+                response = f"[\x0313PDF file\x03] {site_name} {file_identifier}: {formatted_size}"
+            except Exception as e:
+                print(f"Unable to download the PDF file: {e}")
         else:
-            return f"[\x0304PDF file\x03] {site_name} {file_identifier}: Size Unknown"
+            response = f"[\x0304PDF file\x03] {site_name} {file_identifier}: Size Unknown"
+
+        return response
 
     async def handle_gzip(self, url):
         site_name = url.split('/')[2]
@@ -255,24 +314,50 @@ class Titlescraper:
     async def handle_video_file(self, url):
         site_name = url.split('/')[2]
         paste_code = url.split('/')[-1]
+
+        # Determine the script directory and video_files directory
+        script_directory = os.path.dirname(os.path.abspath(__file__))
+        video_files_directory = os.path.join(script_directory, "video_files")
+        
+        # Ensure the video_files directory exists
+        if not os.path.exists(video_files_directory):
+            os.makedirs(video_files_directory)
+
         # Make a HEAD request to get headers
-        response = requests.head(url)
-        
+        head_response = requests.head(url)
+
         # Extract the Content-Length header, which contains the file size in bytes
-        video_size_bytes = response.headers.get('Content-Length')
-        
+        video_size_bytes = head_response.headers.get('Content-Length')
+
         # If Content-Length header is present, format the file size
         if video_size_bytes is not None:
             video_size_bytes = int(video_size_bytes)  # Convert to integer
             formatted_size = self.format_file_size(video_size_bytes)
-            response = f"[\x0307Video file\x03] {site_name} {paste_code}: {formatted_size}"
-            return response
+            
+            try:
+                # Download the video content with a GET request
+                video_response = requests.get(url, stream=True)
+
+                # Save the video file to the video_files directory
+                video_path = os.path.join(video_files_directory, paste_code)
+                with open(video_path, "wb") as video_file:
+                    for chunk in video_response.iter_content(chunk_size=8192):
+                        video_file.write(chunk)
+
+                response = f"[\x0307Video file\x03] {site_name} {paste_code}: {formatted_size}"
+            except Exception as e:
+                print(f"Unable to download the video file: {e}")
         else:
-            return f"[\x0304Video file\x03] {site_name} {paste_code}: Size Unknown"
+            response = f"[\x0304Video file\x03] {site_name} {paste_code}: Size Unknown"
+
+        return response
 
     async def handle_image_url(self, url):
-        site_name = url.split('/')[2]
-        paste_code = url.split('/')[-1]
+        # Clean the URL by removing query parameters
+        clean_url = url.split('?')[0]
+        
+        site_name = clean_url.split('/')[2]
+        paste_code = clean_url.split('/')[-1]
 
         # Determine the script directory
         script_directory = os.path.dirname(os.path.abspath(__file__))
@@ -283,7 +368,7 @@ class Titlescraper:
             os.makedirs(images_directory)
 
         try:
-            image_response = requests.get(url, headers=self.headers)
+            image_response = requests.get(clean_url, headers=self.headers)
             image_size_bytes = len(image_response.content)
             formatted_image_size = self.format_file_size(image_size_bytes)
 
@@ -305,11 +390,15 @@ class Titlescraper:
         return f"[\x0311Image File\x03] {site_name} {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
 
     async def handle_audio_file(self, url):
-        # Handle the case where it's an audio file.
         site_name = url.split('/')[2]
         paste_code = url.split('/')[-1]
 
-        # Initialize the response variable with a default value
+        script_directory = os.path.dirname(os.path.abspath(__file__))
+        sounds_directory = os.path.join(script_directory, "sounds")
+
+        if not os.path.exists(sounds_directory):
+            os.makedirs(sounds_directory)
+
         response = f"[\x0307Audio File\x03] {site_name} (Audio) {paste_code} - Size: unknown size"
 
         try:
@@ -317,26 +406,42 @@ class Titlescraper:
             audio_size_bytes = int(audio_response.headers.get('Content-Length', 0))
 
             formatted_audio_size = self.format_file_size(audio_size_bytes)
+
+            # Save the audio file to the sounds directory
+            audio_path = os.path.join(sounds_directory, paste_code)
+            with open(audio_path, "wb") as audio_file:
+                for chunk in audio_response.iter_content(chunk_size=8192):
+                    audio_file.write(chunk)
+
             response = f"[\x0307Audio File\x03] {site_name} {paste_code} - Size: {formatted_audio_size}"
         except Exception as e:
-            print(f"Error fetching audio size: {e}")
+            print(f"Error fetching and saving audio file: {e}")
 
         return response
 
     async def handle_text_file(self, url):
-        # Handle the case where it's a plain text file.
         site_name = url.split('/')[2]
         paste_code = url.split('/')[-1]
 
-        # Get the text file size using a GET request
+        script_directory = os.path.dirname(os.path.abspath(__file__))
+        texts_directory = os.path.join(script_directory, "texts")
+
+        if not os.path.exists(texts_directory):
+            os.makedirs(texts_directory)
+
+        response = f"[\x0313Text File\x03] {paste_code} - Size: unknown size"
+
         try:
             text_response = requests.get(url, headers=self.headers)
             text_size_bytes = len(text_response.content)
-
             formatted_text_size = self.format_file_size(text_size_bytes)
-            response = f"[\x0313Text File\x03] {site_name} {paste_code} - Size: {formatted_text_size}"
+
+            text_path = os.path.join(texts_directory, f"{paste_code}.txt")
+            with open(text_path, "wb") as text_file:
+                text_file.write(text_response.content)
+
+            response = f"[\x0313Text File\x03] {paste_code} - Size: {formatted_text_size}"
         except Exception as e:
-            print(f"Error fetching text file size: {e}")
-            formatted_text_size = "unknown size"
+            print(f"Error fetching and saving text file: {e}")
 
         return response
