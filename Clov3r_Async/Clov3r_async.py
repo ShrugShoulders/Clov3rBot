@@ -1,5 +1,4 @@
 import asyncio
-import aiohttp
 import base64
 import configparser
 import datetime
@@ -11,18 +10,15 @@ import random
 import re
 import io
 import irctokens
-import requests
 import ssl
-import threading
 import time
-import http.client
-from urllib.parse import urlparse
-from requests.exceptions import HTTPError, Timeout, RequestException
-from PIL import Image
-from bs4 import BeautifulSoup
-from collections import deque
-from html import escape, unescape
 from typing import Optional
+from collections import deque
+from gentoo_bugs import get_bug_details
+from sed import handle_sed_command
+from weather import WeatherSnag
+from colorfetch import handle_color_command
+from help import get_available_commands
 from title_scrape import Titlescraper
 
 class IRCBot:
@@ -38,10 +34,13 @@ class IRCBot:
         self.last_messages = {channel: deque(maxlen=200) for channel in channels}
         self.mushroom_facts = []
         self.ignore_list = []
+        self.quotes = {}
         self.message_queue = {}
         self.last_seen = {}
         self.last_command_time = {}
         self.processed_urls = {}
+        self.response_queue = asyncio.Queue()
+        self.active_quotes = {}
         self.reader = None
         self.writer = None
         self.last_issued_command = None
@@ -49,7 +48,6 @@ class IRCBot:
         self.MIN_COMMAND_INTERVAL = 5
         self.lock = asyncio.Lock()
         self.url_regex = re.compile(r'https?://\S+')
-        self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0', 'Accept-Encoding': 'identity'}
 
     @classmethod
     def from_config_file(cls, config_file, features_file='channels_features.json'):
@@ -409,6 +407,15 @@ class IRCBot:
 
         return False
 
+    async def send_responses_worker(self):
+        """Worker to send responses from the queue with timing."""
+        while True:
+            channel, response = await self.response_queue.get()
+            await self.send(f'PRIVMSG {channel} :{response}\r\n')
+            print(f"Sent: {response} to {channel}")
+            await asyncio.sleep(0.4)
+            self.response_queue.task_done()
+
     async def detect_and_parse_urls(self, sender, channel, content):
         titlescrape = Titlescraper()
 
@@ -423,8 +430,7 @@ class IRCBot:
                     print(f"Ignoring URL with private IP address: {url}")
                     continue
 
-                # Check if the URL has already been processed for the current channel
-                if url in self.processed_urls and channel in self.processed_urls[url]:
+                if url in self.processed_urls.get(channel, set()):
                     print(f"URL already processed for this channel: {url}")
                     continue
 
@@ -433,81 +439,26 @@ class IRCBot:
                 if response is None:
                     return
 
-                # Send the response to the channel
-                await self.send(f'PRIVMSG {channel} :{response}\r\n')
-                print(f"Sent: {response} to {channel}")
+                # Add the response to the queue instead of sending immediately
+                await self.response_queue.put((channel, response))
 
                 # Update the dictionary with the processed URL and channel
                 if url not in self.processed_urls:
                     self.processed_urls[url] = set()
                 self.processed_urls[url].add(channel)
 
-            except requests.exceptions.Timeout:
-                print(f"Timeout processing URL: {url}")
-                continue
-
             except Exception as e:
                 print(f"Error fetching or parsing URL: {e}")
                 titlescrape.handle_title_not_found(url, e)
                 continue
 
-    def get_available_commands(self, exclude_admin=True):
-        # List all available commands (excluding admin commands by default)
-        commands = [
-            ".ping",
-            ".roll",
-            ".fact",
-            ".last",
-            ".tell",
-            ".seen",
-            ".info",
-            ".topic",
-            ".moo",
-            ".moof",
-            ".help",
-            ".rollover",
-            ".stats",
-            ".version",
-            ".sed",
-            ".weather",
-            ".color",
-            ".admin",
-        ]
-        if exclude_admin:
-            commands.remove(".admin")
-        return commands
-
-    def get_detailed_help(self, command):
-        # Provide detailed help for specific commands
-        help_dict = {
-            ".ping": "Ping command: Check if the bot is responsive.",
-            ".roll": "Roll command: Roll a specific die (1d20) Roll multiple dice (4d20) Example: .roll 2d20+4 Available modifiers: +",
-            ".fact": "Fact command: Display a random mushroom fact. Use '.fact <criteria>' to filter facts.",
-            ".last": "Last command: Display the last messages in the channel. Use '.last [1-10]' for specific messages.",
-            ".tell": "Tell command: Save a message for a user. Use '.tell <user> <message>'.",
-            ".seen": "Seen command: Check when a user was last seen. Use '.seen <user>'.",
-            ".info": "Info command: Display information about the bot.",
-            ".topic": "Topic command: Display the current channel topic.",
-            ".moo": "Moo command: Greet the cow.",
-            ".moof": "Moof command: The dogcow, named Clarus, is a bitmapped image designed by Susan Kare for the demonstration of page layout in the classic Mac OS.",
-            ".help": "Help command: Display a list of available commands. Use '.help <command>' for detailed help.",
-            ".rollover": "Rollover command: Woof woof!",
-            ".stats": "Stats command: Display statistics for a user. Use '.stats <user>'.",
-            ".version": "Version command: Shows the version of Clov3r",
-            ".sed": "Sed usage s/change_this/to_this/(g/i). Flags are optional. To include word boundaries use \\b Example: s/\\btest\\b/stuff. I can also take regex. https://tinyurl.com/sedinfo",
-            ".weather": "Search weather forecast - example: .weather Ireland - Can search by address or other terms",
-            ".color": "The Colors command takes either r,g,b values or hex #000000",
-            ".admin": ".factadd - .quit - .join - .part - .op - .deop - .botop - .reload - .purge",
-        }
-
-        return help_dict.get(command, f"No detailed help available for {command}.")
-
     async def help_command(self, channel, sender, args=None, hostmask=None):
         # Get the list of available commands
         exclude_admin = False if hostmask in self.admin_list else True
-        available_commands = self.get_available_commands(exclude_admin=exclude_admin)
+        available_commands = get_available_commands(exclude_admin=exclude_admin)
 
         if args:
+            from help import get_detailed_help
             # Remove the leading period (.) if present
             specific_command = args.split()[0].lstrip('.')
 
@@ -516,23 +467,105 @@ class IRCBot:
 
             if matching_commands:
                 # Provide detailed help for the specific command
-                detailed_help = self.get_detailed_help(matching_commands[0])  # Assuming the first match
-                response = f"PRIVMSG {channel} :{sender}, {detailed_help}\r\n"
+                detailed_help = get_detailed_help(matching_commands[0])  # Assuming the first match
+                response = f"{sender}, {detailed_help}\r\n"
+                await self.response_queue.put((channel, response))
             else:
-                response = f"PRIVMSG {channel} :{sender}, Unknown command: {specific_command}\r\n"
+                response = f"{sender}, Unknown command: {specific_command}\r\n"
+                await self.response_queue.put((channel, response))
         else:
             # Provide an overview of available commands
-            response = f"PRIVMSG {channel} :{sender}, Commands: {', '.join(available_commands)} Use: .help <command> for more info.\r\n"
+            response = f"{sender}, Commands: {', '.join(available_commands)} Use: .help <command> for more info.\r\n"
+            await self.response_queue.put((channel, response))
 
-        # Send the response to the channel
-        await self.send(response)
         print(f"Sent: {response} to {channel}")
 
     async def send_dog_cow_message(self, channel):
-        dog_cow = "https://i.imgur.com/1S6flQw.gif"
+        dog_cow = "https://files.catbox.moe/8lk6xx.gif"
         response = "Hello Clarus, dog or cow?"
         sound = "http://tinyurl.com/mooooof"
         await self.send(f'PRIVMSG {channel} :{response} {dog_cow} mooof {sound}\r\n')
+
+    def save_quotes(self, filename='quotes.json'):
+        """Save the quotes dictionary to a JSON file."""
+        try:
+            with open(filename, 'w') as file:
+                json.dump(self.quotes, file, indent=2)  # Use indent for pretty-printing
+            print("Quotes saved successfully.")
+        except Exception as e:
+            print(f"Failed to save quotes: {e}")
+
+    def load_quotes(self, filename='quotes.json'):
+        """Load the quotes dictionary from a JSON file."""
+        try:
+            self.quotes = {}
+            with open(filename, 'r') as file:
+                self.quotes = json.load(file)
+            print("Quotes loaded successfully.")
+        except FileNotFoundError:
+            print("Quotes file not found, starting with an empty dictionary.")
+            return {}
+        except Exception as e:
+            print(f"Failed to load quotes: {e}")
+            return {}
+
+    async def handle_quote_commands(self, sender, channel, command, content):
+        args = content.split(maxsplit=1)
+        command_arg = args[1].strip() if len(args) > 1 else None
+
+        if command == '.quote':
+            if command_arg and command_arg.isdigit():
+                quote_number = str(command_arg)  # Work with string for consistency
+                # Ensure the channel exists in the quotes dictionary
+                if channel in self.quotes and quote_number in self.quotes[channel]:
+                    quote_info = self.quotes[channel][quote_number]
+                    date = quote_info['date']
+                    recorded_by = quote_info['recorded_by']
+                    quote_content = quote_info['quote']
+
+                    header = f"PRIVMSG {channel} :Quote #{quote_number} recorded by {recorded_by} on {date}:"
+                    await self.send(header)
+                    await asyncio.sleep(0.3)
+
+                    for message in quote_content:
+                        response = f"PRIVMSG {channel} :{message}"
+                        await asyncio.sleep(0.3)
+                        await self.send(response)
+                else:
+                    response = f"PRIVMSG {channel} :Invalid quote number."
+                    await self.send(response)
+            elif sender not in self.active_quotes:
+                self.active_quotes[sender] = (channel, [])  # Track the channel and an empty list for quotes
+                response = f"PRIVMSG {channel} :Start quoting messages from {sender}. Use '.endquote' to finish."
+                await self.send(response)
+            else:
+                response = f"PRIVMSG {channel} :You have already started quoting. Use '.endquote' to finish."
+                await self.send(response)
+
+        elif command == '.endquote':
+            if sender in self.active_quotes:
+                channel_of_quote, quote_content = self.active_quotes.pop(sender)
+                if quote_content:
+                    # Initialize the channel in self.quotes if it does not exist
+                    if channel_of_quote not in self.quotes:
+                        self.quotes[channel_of_quote] = {}
+                    quote_number = str(len(self.quotes[channel_of_quote]) + 1)
+                    quote = {
+                        'recorded_by': sender,
+                        'date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'quote': quote_content
+                    }
+                    # Save the quote under the appropriate channel and quote number
+                    self.quotes[channel_of_quote][quote_number] = quote
+                    self.save_quotes()
+                    self.load_quotes()
+                    response = f"PRIVMSG {channel_of_quote} :Quote #{quote_number} recorded."
+                else:
+                    response = f"PRIVMSG {channel_of_quote} :No messages were quoted."
+                await self.send(response)
+            else:
+                response = f"PRIVMSG {channel} :You have not started quoting. Use '.quote' to start."
+                await self.send(response)
 
     async def user_commands(self, sender, channel, content, hostmask):
         global disconnect_requested
@@ -545,10 +578,14 @@ class IRCBot:
         if not content.strip():
             return
 
+        if sender in self.active_quotes:
+            self.active_quotes[sender][1].append(content)
+
         # Check if the message starts with 's/' for sed-like command
         if content and content.startswith(('s/', 'S/')):
             if await self.handle_channel_features(channel, '.sed'):
-                await self.handle_sed_command(channel, sender, content)
+                response = await handle_sed_command(channel, sender, content, self.last_messages)
+                await self.response_queue.put((channel, response))
         else:
             # Check if there are any words in the content before accessing the first word
             if content:
@@ -570,40 +607,19 @@ class IRCBot:
                             response = f"PRIVMSG {channel} :[\x0303Ping\x03] {sender}: PNOG!"
                             await self.send(response)
 
+                        case '.quote' | '.endquote':
+                            await self.handle_quote_commands(sender, channel, command, content)
+
                         case '.color':
                             self.last_command_time[sender] = time.time()
-                            input_value = args.strip()
-
-                            # Strip out the '#' if it's present
-                            if input_value.startswith('#'):
-                                input_value = input_value[1:]
-
-                            # Check if input is in RGB decimal format
-                            if ',' in input_value:
-                                try:
-                                    rgb_values = [int(x) for x in input_value.split(',')]
-                                    if len(rgb_values) == 3 and all(0 <= x <= 255 for x in rgb_values):
-                                        # Convert RGB to hex
-                                        color_code = ''.join(f'{x:02x}' for x in rgb_values)
-                                    else:
-                                        raise ValueError
-                                except ValueError:
-                                    response = f"PRIVMSG {channel} :Invalid RGB format. Please use the format R,G,B where R, G, and B are between 0 and 255."
-                                    await self.send(response)
-                                    return
-                            else:
-                                color_code = input_value
-
-                            # Validate hex color code
-                            if len(color_code) == 6 and all(c in '0123456789abcdefABCDEF' for c in color_code):
-                                await self.get_color_info(color_code, channel)
-                            else:
-                                response = f"PRIVMSG {channel} :Invalid color code format. Please use a 6-digit hexadecimal code or R,G,B format."
-                                await self.send(response)
+                            response = await handle_color_command(sender, channel, args)
+                            await self.send(response)
 
                         case '.weather':
                             self.last_command_time[sender] = time.time()
-                            await self.get_weather(args, channel)
+                            snag = WeatherSnag()
+                            response = await snag.get_weather(args, channel)
+                            await self.send(response)
 
                         case '.roll':
                             # Roll the dice
@@ -672,6 +688,10 @@ class IRCBot:
                             # Handle the !stats command
                             await self.stats_command(channel, sender, content)
 
+                        case '.bug':
+                            response = get_bug_details(args)
+                            await self.send(f"PRIVMSG {channel} :{response}")
+
                         case '.factadd' if hostmask in self.admin_list:
                             # Handle the !factadd command
                             new_fact = args.strip()
@@ -721,124 +741,6 @@ class IRCBot:
                         case '.purge' if hostmask in self.admin_list:
                             await self.purge_message_queue(channel, sender)
 
-    async def get_color_info(self, color_code, channel):
-        url = f"https://www.color-hex.com/color/{color_code}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    # Assuming the title tag contains the color name/description
-                    title = soup.title.string if soup.title else 'Unknown Color' #soup.find('title')
-                    
-                    # Construct the response message with the title and URL
-                    response_message = f"Color information for {color_code} ({title}): {url}"
-                else:
-                    response_message = "Failed to retrieve color information."
-        
-        await self.send(f"PRIVMSG {channel} :{response_message}")
-
-    async def geocode_location(self, location):
-        # If the location is empty, return None
-        if not location:
-            return None, None
-
-        try:
-            # Make a request to retrieve the latitude and longitude for the location
-            response = requests.get(f"https://geocode.maps.co/search?q={location}&api_key=65b583605ab6a403481192yza5a9247")
-            print("Geocoding response status code:", response.status_code)
-            print("Geocoding response content:", response.content)
-            
-            # Check if the request was successful (status code 200)
-            if response.status_code == 200:
-                # Parse the JSON response
-                data = response.json()
-                
-                # Extract latitude and longitude from the first place_id
-                if data:
-                    first_place = data[0]
-                    latitude = round(float(first_place["lat"]), 4)
-                    longitude = round(float(first_place["lon"]), 4)
-                    return latitude, longitude
-
-            # If unable to get latitude and longitude from the location
-            print("Unable to geocode the location:", location)
-            return None, None
-            
-        except Exception as e:
-            print("An error occurred while geocoding:", e)
-            return None, None
-
-    async def get_weather(self, location, channel):
-        # Set your user agent
-        user_agent = "Clov3r_forecast, connorkim.kim3@gmail.com"
-
-        # Get latitude and longitude from geocoding
-        lat, lon = await self.geocode_location(location)
-
-        # If unable to geocode the location, respond accordingly
-        if lat is None or lon is None:
-            response = f"PRIVMSG {channel} :Unable to get latitude and longitude for the location: {location}."
-            await self.send(response)
-            return
-
-        # Get the forecast data for the given latitude and longitude
-        try:
-            # Make a request to retrieve the weather forecast data
-            response = requests.get(f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={lat}&lon={lon}", headers={"User-Agent": user_agent})
-            print("Response status code:", response.status_code)
-            print("Response content:", response.content)
-            
-            # Check if the request was successful (status code 200)
-            if response.status_code == 200:
-                # Parse the JSON response
-                data = response.json()
-                
-                # Extract relevant weather information
-                timeseries = data.get("properties", {}).get("timeseries", [])
-                
-                if timeseries:
-                    # Get the current forecast (first entry in timeseries)
-                    current_forecast = timeseries[0]
-                    print("Current forecast:", current_forecast)
-                    
-                    # Extract data from the current forecast
-                    instant_details = current_forecast.get("data", {}).get("instant", {}).get("details", {})
-                    print("Instant details:", instant_details)
-                    next_1_hours_summary = current_forecast.get("data", {}).get("next_1_hours", {}).get("summary", {})
-                    print("Next 1 hour summary:", next_1_hours_summary)
-                    next_6_hours_summary = current_forecast.get("data", {}).get("next_6_hours", {}).get("summary", {})
-                    print("Next 6 hours summary:", next_6_hours_summary)
-
-                    # Calculate temperature in Fahrenheit
-                    celsius_temp = instant_details.get('air_temperature')
-                    fahrenheit_temp = (celsius_temp * 9/5) + 32
-                    
-                    # Construct weather forecast message
-                    forecast_message = f"[\x0311{location}\x03]:" #, lat={lat}, lon={lon}
-                    temp_message = f"Current temperature: {celsius_temp}C/{fahrenheit_temp}F"
-                    cloud_message = f"Cloud coverage: {instant_details.get('cloud_area_fraction')}%"
-                    humidity_message = f"Humidity: {instant_details.get('relative_humidity')}%"
-                    wind_direction = f"Wind Direction: {instant_details.get('wind_from_direction')}"
-                    wind_speed = f"Wind Speed: {instant_details.get('wind_speed')}"
-                    nxt1hr_message = f"Next 1 hour: {next_1_hours_summary.get('symbol_code', 'N/A')}"
-                    nxt6hr_message = f"Next 6 hours: {next_6_hours_summary.get('symbol_code', 'N/A')}"
-                    
-                    # Send weather forecast to the channel
-                    response = f"PRIVMSG {channel} :{forecast_message} " + f"{temp_message} " + f"{cloud_message} " + f"{humidity_message} " + f"{wind_speed} " + f"{wind_direction} " + f"{nxt1hr_message} " + f"{nxt6hr_message} "
-                    await self.send(response)
-                    return
-                
-            # If no forecast available
-            response = f"PRIVMSG {channel} :No forecast available for location: {location}."
-            await self.send(response)
-            
-        except Exception as e:
-            print("An error occurred:", e)
-            response = f"PRIVMSG {channel} :An error occurred while fetching weather information."
-            await self.send(response)
-
     async def stats_command(self, channel, sender, content):
         # Extract the target user from the command
         target_user = content.split()[1].strip() if len(content.split()) > 1 else None
@@ -850,27 +752,30 @@ class IRCBot:
             # Check if the target user has chat count information
             if target_user in self.last_seen and channel in self.last_seen[target_user]:
                 chat_count = self.last_seen[target_user][channel].get('chat_count', 0)
-                response = f"PRIVMSG {channel} :{sender}, I've seen {target_user} send {chat_count} messages"
-                await self.send(response)
+                response = f"{sender}, I've seen {target_user} send {chat_count} messages"
+                await self.response_queue.put((channel, response))
             else:
-                response = f"PRIVMSG {channel} :{sender}, no stats found for {target_user}"
-                await self.send(response)
+                response = f"{sender}, no stats found for {target_user}"
+                await self.response_queue.put((channel, response))
         else:
-            response = f"PRIVMSG {channel} :{sender}, please provide a target user for the .stats command"
-            await self.send(response)
+            response = f"{sender}, please provide a target user for the .stats command"
+            await self.response_queue.put((channel, response))
 
     async def reload_command(self, channel, sender):
         self.channels_features = {}
         self.mushroom_facts = []
         self.ignore_list = []
         self.last_seen = {}
+        self.active_quotes = {}
+        self.quotes = []
         self.load_channel_features()
         self.load_mushroom_facts()
         self.load_message_queue()
         self.load_last_seen()
         self.load_ignore_list()
-        response = f"PRIVMSG {channel} :{sender}, Clov3r Successfully Reloaded.\r\n"
-        await self.send(response)
+        self.load_quotes()
+        response = f"{sender}, Clov3r Successfully Reloaded.\r\n"
+        await self.response_queue.put((channel, response))
         print(f"Sent: {response} to {channel}")
 
     async def last_command(self, channel, sender, content):
@@ -1129,98 +1034,6 @@ class IRCBot:
         # Extract the criteria from the user's command (e.g., "parasol")
         return lambda fact: args.lower() in fact.lower()
 
-    async def handle_sed_command(self, channel, sender, content):
-        try:
-            match = re.match(r'[sS]/(.*?)/(.*?)(?:/([gi]*))?(/(\d*))?(?:/(.*))?$', content.replace(r'\/', '__SLASH__'))
-            character_limit = 460
-            if match:
-                old, new, flags, _, occurrence, target_nickname = match.groups()  # Adjusted unpacking to match the new group structure
-                flags = flags if flags else ''  # Ensure flags are set to an empty string if not provided
-                occurrence = int(occurrence) if occurrence else 0  # Convert occurrence to an integer if provided, defaulting to 0
-                # Unescape slashes that were replaced
-                old = old.replace("__SLASH__", "/")
-                new = new.replace("__SLASH__", "/")
-
-                # Check for word boundaries flag
-                word_boundaries = r'\b' if '\\b' in old else ''
-
-                # If the old string contains \d, replace it with [0-9]
-                old = old.replace(r'\\d', r'[0-9]')
-
-                # Update the regular expression with word boundaries
-                regex_pattern = fr'{word_boundaries}{old}{word_boundaries}'
-
-            else:
-                raise ValueError("Invalid sed command format")
-
-            # Check if the channel key exists in self.last_messages
-            if channel in self.last_messages:
-                corrected_message = None
-                original_sender_corrected = None
-                total_characters = 0
-                regex_flags = re.IGNORECASE if 'i' in flags else 0
-                for formatted_message in reversed(self.last_messages[channel]):
-                    original_message = formatted_message["content"]
-                    original_sender = formatted_message["sender"]
-
-                    # Skip messages not matching the target nickname if specified
-                    if target_nickname and original_sender != target_nickname:
-                        continue
-
-                    if re.match(r'^[sS]/.*/.*/?[gi]*\d*$', original_message):
-                        continue
-
-                    print(f"Checking message - Original: <{original_sender}> {original_message}")
-
-                    if re.search(regex_pattern, original_message, flags=regex_flags):
-                        if occurrence:
-                            # Function to replace only the specified occurrence
-                            def replace_nth(match):
-                                nonlocal occurrence
-                                occurrence -= 1
-                                return new if occurrence == 0 else match.group(0)
-
-                            replaced_message = re.sub(regex_pattern, replace_nth, original_message, flags=regex_flags)
-                        else:
-                            count = 0 if 'g' in flags else 1
-                            replaced_message = re.sub(regex_pattern, new, original_message, flags=regex_flags, count=count)
-
-                        total_characters += len(replaced_message)
-
-                        if replaced_message != original_message and total_characters <= character_limit:
-                            corrected_message = replaced_message
-                            original_sender_corrected = original_sender
-                            print(f"Match found - Corrected: <{original_sender_corrected}> {corrected_message}")
-                            
-                            break
-
-                if corrected_message is not None and original_sender_corrected is not None:
-                    if corrected_message.startswith("*"):
-                        response = f"PRIVMSG {channel} :[\x0303Sed\x03] {corrected_message}\r\n"
-                    else:
-                        response = f"PRIVMSG {channel} :[\x0303Sed\x03] <{original_sender_corrected}> {corrected_message}\r\n"
-
-                    await self.send(response)
-                    print(f"Sent: {response} to {channel}")
-                else:
-                    response = f"PRIVMSG {channel} :[\x0304Sed\x03] No matching message found to correct from {target_nickname}\r\n"
-                    await self.send(response)
-                    print(f"Sent: {response} to {channel}")
-
-            else:
-                response = f"PRIVMSG {channel} :[\x0304Sed\x03] No message history found for the channel\r\n"
-                await self.send(response)
-                print(f"Sent: {response} to {channel}")
-
-        except re.error as e:
-            response = f"PRIVMSG {channel} :[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
-            await self.send(response)
-            print(f"Sent: {response} to {channel}")
-        except ValueError:
-            response = f"PRIVMSG {channel} :[\x0304Sed\x03] Invalid sed command format\r\n"
-            await self.send(response)
-            print(f"Sent: {response} to {channel}")
-
     async def disconnect(self):
         if self.writer:
             self.writer.close()
@@ -1232,16 +1045,18 @@ class IRCBot:
             self.load_message_queue()
             self.load_last_seen()
             self.load_ignore_list()
+            self.load_quotes()
             await self.load_last_messages()
             await self.connect()
 
             keep_alive_task = asyncio.create_task(self.keep_alive())
             handle_messages_task = asyncio.create_task(self.handle_messages())
             clear_urls_task = asyncio.create_task(self.clear_urls())
+            response_handler = asyncio.create_task(self.send_responses_worker())
 
             # Wait for either of the tasks to finish
             done, pending = await asyncio.wait(
-                [keep_alive_task, handle_messages_task, clear_urls_task],
+                [keep_alive_task, handle_messages_task, clear_urls_task, response_handler],
                 return_when=asyncio.FIRST_COMPLETED
             )
 
