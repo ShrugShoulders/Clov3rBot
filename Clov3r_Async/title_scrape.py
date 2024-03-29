@@ -10,15 +10,19 @@ import datetime
 import io
 import os
 import magic
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from html import escape, unescape
 from requests.exceptions import HTTPError, Timeout, RequestException
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
 from PIL import Image
 
 class Titlescraper:
     def __init__(self):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0', 'Accept-Encoding': 'identity'}
+        self.api_key = ""
+        self.youtube_service = build('youtube', 'v3', developerKey=self.api_key)
 
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
@@ -193,7 +197,7 @@ class Titlescraper:
         elif hostname == 'twitter.com':
             return f"[\x0303Website\x03] X (formerly Twitter)"
         elif hostname in ['www.youtube.com', 'youtube.com', 'youtu.be']:
-            return await self.process_youtube(url)
+            return await self.process_youtube_video(url)
         elif hostname in ['reddit.com', 'www.reddit.com']:
             old_reddit_url = url.replace(hostname, 'old.reddit.com')
             return await self.process_reddit_url(old_reddit_url)
@@ -203,30 +207,43 @@ class Titlescraper:
         else:
             return await self.sanitize_input(await self.extract_webpage_title(url))
 
-    async def process_youtube(self, url):
+    async def process_youtube_video(self, url):
+        loop = asyncio.get_event_loop()
         try:
-            response = await self.fetch_youtube_title(url)
-            return await self.extract_webpage_title_from_youtube(response)
+            video_id = self.extract_video_id(url)
+            video_data = await loop.run_in_executor(None, self.fetch_youtube_video_data, video_id)
+            return self.format_video_data(video_data)
         except Exception as e:
-            print(f"Error processing YouTube link: {e}")
+            print(f"Error processing YouTube video: {e}")
 
-    async def fetch_youtube_title(self, url):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self.headers, timeout=aiohttp.ClientTimeout(total=1.5)) as response:
-                    response.raise_for_status()
-                    return await response.text()
-        except Exception as e:
-            raise Exception(f"Error fetching YouTube site content: {e}")
+    def extract_video_id(self, url):
+        parsed_url = urlparse(url)
+        query_params = parse_qs(parsed_url.query)
+        video_id = query_params.get('v', [None])[0]
+        if not video_id:
+            raise ValueError("YouTube video ID could not be extracted.")
+        return video_id
 
-    async def extract_webpage_title_from_youtube(self, html_content):
-        soup = BeautifulSoup(html_content, 'html.parser')
-        og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
-        if og_title_tag and og_title_tag.has_attr('content'):
-            title = unescape(og_title_tag['content'].strip())
-            return f"[\x0301,00\x02You\x0300,04\x02Tube\x03] {title}"
+    def fetch_youtube_video_data(self, video_id):
+        request = self.youtube_service.videos().list(
+            part="snippet,statistics",
+            id=video_id
+        )
+        response = request.execute()
+        if 'items' in response and len(response['items']) > 0:
+            return response['items'][0]
         else:
-            return "Title not found"
+            raise Exception("Video data not found")
+
+    def format_video_data(self, video_data):
+        title = video_data['snippet']['title']
+        viewCount = video_data['statistics']['viewCount']
+        likeCount = video_data['statistics']['likeCount']
+        favoriteCount = video_data['statistics']['favoriteCount']
+        commentCount = video_data['statistics']['commentCount']
+        
+        formatted_data = (f"Title: \x02{title}\x0F Views: \x1F{viewCount}\x0F Likes: \x1D{likeCount}\x0F Favorites: \x0303\x02{favoriteCount}\x0F Comments: \x0307\x02{commentCount}\x0F")
+        return f"[\x0301,00\x02You\x0300,04\x02Tube\x03] {formatted_data}"
 
     def process_amazon_url(self, url):
         product_name = " ".join(url.split('/')[3].split('-')).title()
