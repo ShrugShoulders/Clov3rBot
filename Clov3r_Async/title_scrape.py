@@ -10,6 +10,8 @@ import datetime
 import io
 import os
 import magic
+import json
+from datetime import datetime, timedelta
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from html import escape, unescape
@@ -53,7 +55,7 @@ class Titlescraper:
         REQUEST_TIMEOUT = 10
         parsed_url = urlparse(url)
         connection = http.client.HTTPConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT)
-        EXECUTABLE_FILE_EXTENSIONS = ['.exe', '.dll', '.bat', '.jar', '.iso']
+        EXECUTABLE_FILE_EXTENSIONS = ['.exe', '.dll', '.jar', '.iso']
 
         # Define headers with User-Agent
         headers = self.headers
@@ -86,9 +88,13 @@ class Titlescraper:
                 content_type = magic.from_buffer(content_bytes, mime=True)
                 print(f"{content_type}")
                 
-                if content_type in ['application/octet-stream', 'application/zip']:
+                if content_type in ['application/octet-stream', 'application/zip', 'text/plain']:
                     if url.endswith(('.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.mha', '.mhm', '.aiff', '.alac', '.opus', '.spx', '.amr', '.ac3', '.dsf', '.dff', '.ape')):
                         return await self.handle_audio_file(url)
+                    elif url.endswith(('.bat', '.toml', '.sh')):
+                        return await self.handle_script(url, content_type)
+                else:
+                    pass
 
                 #content_type = response.getheader('Content-Type', '').lower()
                 charset = 'utf-8'
@@ -101,13 +107,15 @@ class Titlescraper:
                     return await self.handle_image_url(url)
                 elif content_type.startswith('video/'):
                     return await self.handle_video_file(url)
-                elif content_type.startswith('text/plain'):
+                elif content_type in ['text/plain', 'text/rtf', 'text/richtext']:
                     return await self.handle_text_file(url)
+                elif content_type.startswith(('text/x-', 'application/x-')) or content_type in ['application/perl', 'application/x-python-code', 'application/javascript', 'text/css', 'application/json', 'text/vnd.curl', 'application/typescript', 'application/xml', 'text/xml', 'application/toml']:
+                    return await self.handle_script(url, content_type)
                 elif content_type.startswith('audio/'):
                     return await self.handle_audio_file(url)
                 elif content_type == 'application/pdf':
                     return await self.handle_pdf_file(url)
-                elif content_type == 'application/octet-stream':
+                elif content_type in ['application/octet-stream', 'application/zip']:
                     return await self.handle_gzip(url)
                 elif content_type == 'application/x-iso9660-image':
                     return "ISO"
@@ -144,12 +152,16 @@ class Titlescraper:
                                 self.handle_title_not_found(url, e)
 
                 elif content_length > MAX_FILE_SIZE:
-                    print(f"Max Size")
+                    e = f"Max Size"
+                    self.handle_title_not_found(url, e)
                     return 
                 elif any(url.lower().endswith(ext) for ext in EXECUTABLE_FILE_EXTENSIONS):
-                    print(f"Banned File Type")
+                    e = f"Banned File Type"
+                    self.handle_title_not_found(url, e)
                     return 
                 else:
+                    e = f"Unknown mime/type {content_type}"
+                    self.handle_title_not_found(url, e)
                     return
             else:
                 return
@@ -218,31 +230,79 @@ class Titlescraper:
 
     def extract_video_id(self, url):
         parsed_url = urlparse(url)
-        query_params = parse_qs(parsed_url.query)
-        video_id = query_params.get('v', [None])[0]
+        if parsed_url.netloc == 'www.youtube.com':
+            query_params = parse_qs(parsed_url.query)
+            video_id = query_params.get('v', [None])[0]
+        elif parsed_url.netloc == 'youtu.be':
+            video_id = parsed_url.path.lstrip('/')
+        else:
+            raise ValueError("Invalid YouTube URL.")
+        
         if not video_id:
             raise ValueError("YouTube video ID could not be extracted.")
         return video_id
 
     def fetch_youtube_video_data(self, video_id):
+        script_directory = os.path.dirname(os.path.abspath(__file__))
+        youtube_cache = os.path.join(script_directory, "youtube_cache")
+        
+        # Ensure the youtube_cache directory exists
+        if not os.path.exists(youtube_cache):
+            os.makedirs(youtube_cache)
+        
+        cache_file_path = os.path.join(youtube_cache, f"{video_id}.json")
+        
+        # Check if the cache file exists and is less than 24 hours old
+        if os.path.exists(cache_file_path):
+            file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file_path))
+            if datetime.now() - file_mod_time < timedelta(hours=8):
+                with open(cache_file_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        
+        # If the cache file does not exist or is outdated, fetch data from the API
         request = self.youtube_service.videos().list(
-            part="snippet,statistics",
+            part="snippet,contentDetails,statistics",
             id=video_id
         )
         response = request.execute()
+        
         if 'items' in response and len(response['items']) > 0:
+            print(f"{response['items'][0]}")
+            
+            # Save the new or updated video data to the cache file
+            with open(cache_file_path, 'w', encoding='utf-8') as f:
+                json.dump(response['items'][0], f, ensure_ascii=False, indent=2)
+            
             return response['items'][0]
         else:
             raise Exception("Video data not found")
 
     def format_video_data(self, video_data):
         title = video_data['snippet']['title']
+        live = video_data['snippet']['liveBroadcastContent']
         viewCount = video_data['statistics']['viewCount']
         likeCount = video_data['statistics']['likeCount']
         favoriteCount = video_data['statistics']['favoriteCount']
         commentCount = video_data['statistics']['commentCount']
+        duration = video_data['contentDetails']['duration']
+        cleaned_duration = duration.lstrip('PT')
+
+        formatted_parts = [f"Title: \x02{title}\x0F"]
+        if live != 'none':
+            formatted_parts.append("- LIVE NOW!")
+        else:
+            formatted_parts.append(f"({cleaned_duration})")
         
-        formatted_data = (f"Title: \x02{title}\x0F Views: \x1F{viewCount}\x0F Likes: \x1D{likeCount}\x0F Favorites: \x0303\x02{favoriteCount}\x0F Comments: \x0307\x02{commentCount}\x0F")
+        if viewCount != '0':
+            formatted_parts.append(f"Views: \x1F{viewCount}\x0F")
+        if likeCount != '0':
+            formatted_parts.append(f"Likes: \x1D{likeCount}\x0F")
+        if favoriteCount != '0':
+            formatted_parts.append(f"Favorites: \x0303\x02{favoriteCount}\x0F")
+        if commentCount != '0':
+            formatted_parts.append(f"Comments: \x0307\x02{commentCount}\x0F")
+        
+        formatted_data = " ".join(formatted_parts)
         return f"[\x0301,00\x02You\x0300,04\x02Tube\x03] {formatted_data}"
 
     def process_amazon_url(self, url):
@@ -458,6 +518,90 @@ class Titlescraper:
                 text_file.write(text_response.content)
 
             response = f"[\x0313Text File\x03] {paste_code} - Size: {formatted_text_size}"
+        except Exception as e:
+            print(f"Error fetching and saving text file: {e}")
+
+        return response
+
+    async def handle_script(self, url, content_type):
+        site_name = url.split('/')[2]
+        paste_code = url.split('/')[-1].split('?')[0]
+
+        mime_type_extension_mapping = {
+            'text/plain': '.txt',
+            'application/javascript': '.js',
+            'text/css': '.css',
+            'application/json': '.json',
+            'text/x-python': '.py',
+            'text/x-diff': '.diff',
+            'text/x-yaml': '.yaml',
+            'text/x-log': '.log',
+            'text/x-asm': '.asm',
+            'text/x-csv': '.csv',
+            'text/x-c': '.c',
+            'text/x-java-source': '.java',
+            'text/x-json': '.json',
+            'text/x-markdown': '.markdown',
+            'text/x-latex': '.tex',
+            'text/x-httpd-php': '.php',
+            'text/vnd.curl': '.curl',
+            'text/x-shellscript': '.sh',
+            'text/x-scriptzsh': '.zsh',
+            'text/x-sql': '.sql',
+            'text/x-ruby': '.rb',
+            'text/x-perl': '.pl',
+            'text/x-c++src': '.cpp',
+            'text/x-csrc': '.c',
+            'application/xml': '.xml',
+            'text/xml': '.xml',
+            'text/x-lua': '.lua',
+            'text/x-scala': '.scala',
+            'text/x-erlang': '.erl',
+            'text/x-groovy': '.groovy',
+            'text/x-kotlin': '.kt',
+            'text/x-swift': '.swift',
+            'text/x-go': '.go',
+            'text/x-typescript': '.ts',
+            'application/typescript': '.ts',
+            'text/x-sass': '.sass',
+            'text/x-scss': '.scss',
+            'text/x-haskell': '.hs',
+            'text/x-rust': '.rs',
+            'text/x-powershell': '.ps1',
+            'application/x-bat': '.bat',
+            'application/x-shellscript': '.sh',
+            'text/x-matlab': '.m',
+            'application/toml': '.toml',
+        }
+
+        script_directory = os.path.dirname(os.path.abspath(__file__))
+        texts_directory = os.path.join(script_directory, "scripts")
+
+        if not os.path.exists(texts_directory):
+            os.makedirs(texts_directory)
+
+        response = f"[\x0310Script/Source\x03] {paste_code} - Size: unknown size"
+
+        try:
+            headers = self.headers
+            text_response = requests.get(url, headers=headers)
+            text_size_bytes = len(text_response.content)
+            formatted_text_size = self.format_file_size(text_size_bytes)
+
+            # Extract file extension from URL if present
+            url_file_extension = os.path.splitext(paste_code)[1]
+            if url_file_extension:
+                file_extension = ""
+            else:
+                file_extension = mime_type_extension_mapping.get(content_type, '.txt')
+            
+            # Generate the file path with the appropriate extension
+            text_path = os.path.join(texts_directory, f"{paste_code}{file_extension}")
+            
+            with open(text_path, "wb") as text_file:
+                text_file.write(text_response.content)
+
+            response = f"[\x0310Script/Source\x03] {paste_code} - Size: {formatted_text_size}"
         except Exception as e:
             print(f"Error fetching and saving text file: {e}")
 
