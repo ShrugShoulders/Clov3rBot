@@ -6,7 +6,6 @@ import requests
 import ipaddress
 import html
 import http.client
-import datetime
 import io
 import os
 import magic
@@ -230,13 +229,16 @@ class Titlescraper:
 
     def extract_video_id(self, url):
         parsed_url = urlparse(url)
-        if parsed_url.netloc == 'www.youtube.com':
-            query_params = parse_qs(parsed_url.query)
-            video_id = query_params.get('v', [None])[0]
-        elif parsed_url.netloc == 'youtu.be':
-            video_id = parsed_url.path.lstrip('/')
-        else:
-            raise ValueError("Invalid YouTube URL.")
+        video_id = None
+        
+        if parsed_url.netloc in ['www.youtube.com', 'youtu.be']:
+            if parsed_url.path.startswith('/watch'):
+                query_params = parse_qs(parsed_url.query)
+                video_id = query_params.get('v', [None])[0]
+            elif parsed_url.path.startswith('/shorts'):
+                video_id = parsed_url.path.split('/')[2]  # Assumes URL path format is /shorts/VIDEO_ID
+            elif parsed_url.netloc == 'youtu.be':
+                video_id = parsed_url.path.lstrip('/')
         
         if not video_id:
             raise ValueError("YouTube video ID could not be extracted.")
@@ -280,10 +282,10 @@ class Titlescraper:
     def format_video_data(self, video_data):
         title = video_data['snippet']['title']
         live = video_data['snippet']['liveBroadcastContent']
-        viewCount = video_data['statistics']['viewCount']
-        likeCount = video_data['statistics']['likeCount']
-        favoriteCount = video_data['statistics']['favoriteCount']
-        commentCount = video_data['statistics']['commentCount']
+        viewCount = video_data['statistics'].get('viewCount', '0')
+        likeCount = video_data['statistics'].get('likeCount', '0')
+        favoriteCount = video_data['statistics'].get('favoriteCount', '0')
+        commentCount = video_data['statistics'].get('commentCount')
         duration = video_data['contentDetails']['duration']
         cleaned_duration = duration.lstrip('PT')
 
@@ -299,7 +301,8 @@ class Titlescraper:
             formatted_parts.append(f"Likes: \x1D{likeCount}\x0F")
         if favoriteCount != '0':
             formatted_parts.append(f"Favorites: \x0303\x02{favoriteCount}\x0F")
-        if commentCount != '0':
+        # Only add comment count if it exists and is not '0'
+        if commentCount and commentCount != '0':
             formatted_parts.append(f"Comments: \x0307\x02{commentCount}\x0F")
         
         formatted_data = " ".join(formatted_parts)
@@ -322,7 +325,7 @@ class Titlescraper:
 
     def save_no_title(self, url, e):
         # Get the current datetime for the log entry
-        now = datetime.datetime.now()
+        now = datetime.now()
         log_entry = f"{now}: Title not found for URL: {url} {e}\n"
 
         # Append the log entry to the file
