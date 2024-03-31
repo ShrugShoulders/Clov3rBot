@@ -207,7 +207,7 @@ class Titlescraper:
             return self.process_crates_url(url)
         elif hostname == 'twitter.com':
             return f"[\x0303Website\x03] X (formerly Twitter)"
-        elif hostname in ['www.youtube.com', 'youtube.com', 'youtu.be']:
+        elif hostname in ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com']:
             return await self.process_youtube_video(url)
         elif hostname in ['reddit.com', 'www.reddit.com']:
             old_reddit_url = url.replace(hostname, 'old.reddit.com')
@@ -231,12 +231,12 @@ class Titlescraper:
         parsed_url = urlparse(url)
         video_id = None
         
-        if parsed_url.netloc in ['www.youtube.com', 'youtu.be']:
+        if parsed_url.netloc in ['www.youtube.com', 'youtu.be', 'm.youtube.com']:
             if parsed_url.path.startswith('/watch'):
                 query_params = parse_qs(parsed_url.query)
                 video_id = query_params.get('v', [None])[0]
             elif parsed_url.path.startswith('/shorts'):
-                video_id = parsed_url.path.split('/')[2]  # Assumes URL path format is /shorts/VIDEO_ID
+                video_id = parsed_url.path.split('/')[2]
             elif parsed_url.netloc == 'youtu.be':
                 video_id = parsed_url.path.lstrip('/')
         
@@ -290,18 +290,17 @@ class Titlescraper:
         cleaned_duration = duration.lstrip('PT')
 
         formatted_parts = [f"Title: \x02{title}\x0F"]
-        if live != 'none':
+        if live and live != 'none':
             formatted_parts.append("- LIVE NOW!")
         else:
             formatted_parts.append(f"({cleaned_duration})")
         
-        if viewCount != '0':
+        if viewCount and viewCount != '0':
             formatted_parts.append(f"Views: \x1F{viewCount}\x0F")
-        if likeCount != '0':
+        if likeCount and likeCount != '0':
             formatted_parts.append(f"Likes: \x1D{likeCount}\x0F")
-        if favoriteCount != '0':
+        if favoriteCount and favoriteCount != '0':
             formatted_parts.append(f"Favorites: \x0303\x02{favoriteCount}\x0F")
-        # Only add comment count if it exists and is not '0'
         if commentCount and commentCount != '0':
             formatted_parts.append(f"Comments: \x0307\x02{commentCount}\x0F")
         
