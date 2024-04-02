@@ -20,6 +20,8 @@ from weather import WeatherSnag
 from colorfetch import handle_color_command
 from help import get_available_commands
 from title_scrape import Titlescraper
+from google_api import Googlesearch
+from duckduckgo import duck_search, duck_translate
 
 class IRCBot:
     def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, channels_features=None, ignore_list_file=None):
@@ -47,7 +49,8 @@ class IRCBot:
         self.topic_command = False
         self.MIN_COMMAND_INTERVAL = 5
         self.lock = asyncio.Lock()
-        self.url_regex = re.compile(r'https?://\S+')
+        self.url_regex = re.compile(r'https?://[^\s\x00-\x1F\x7F]+')
+        self.search = Googlesearch()
 
     @classmethod
     def from_config_file(cls, config_file, features_file='channels_features.json'):
@@ -607,6 +610,18 @@ class IRCBot:
                             response = f"PRIVMSG {channel} :[\x0303Ping\x03] {sender}: PNOG!"
                             await self.send(response)
 
+                        case '.tr':
+                            response = duck_translate(args)
+                            await self.response_queue.put((channel, response))
+
+                        case '.g':
+                            response = self.search.google_it(args)
+                            await self.response_queue.put((channel, response))
+
+                        case '.ddg':
+                            response = duck_search(args, channel)
+                            await self.response_queue.put((channel, response))
+
                         case '.quote' | '.endquote':
                             await self.handle_quote_commands(sender, channel, command, content)
 
@@ -671,7 +686,7 @@ class IRCBot:
 
                         case '.version':
                             self.last_command_time[sender] = time.time()
-                            version = "Clov3rBot Version 1.2"
+                            version = "Clov3rBot Version 6.66666"
                             response = f"PRIVMSG {channel} :{version}"
                             await self.send(response)
 
