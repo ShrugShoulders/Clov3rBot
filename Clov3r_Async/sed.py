@@ -46,6 +46,12 @@ async def handle_sed_command(channel, sender, content, last_messages):
                 if re.match(r'^[sS]/.*/.*/?[gi]*\d*$', original_message):
                     continue
 
+                if old in ["*", "$", "^"]:
+                    if original_message.startswith("*"):
+                        return f"[\x0303Sed\x03] {original_message}\r\n"
+                    else:
+                        return f"[\x0303Sed\x03] <{original_sender}> {original_message}\r\n"
+
                 print(f"Checking message - Original: <{original_sender}> {original_message}")
 
                 if re.search(regex_pattern, original_message, flags=regex_flags):
@@ -72,27 +78,27 @@ async def handle_sed_command(channel, sender, content, last_messages):
 
             if corrected_message is not None and original_sender_corrected is not None:
                 if corrected_message.startswith("*"):
-                    response = f"PRIVMSG {channel} :[\x0303Sed\x03] {corrected_message}\r\n"
+                    response = f"[\x0303Sed\x03] {corrected_message}\r\n"
                 else:
-                    response = f"PRIVMSG {channel} :[\x0303Sed\x03] <{original_sender_corrected}> {corrected_message}\r\n"
+                    response = f"[\x0303Sed\x03] <{original_sender_corrected}> {corrected_message}\r\n"
 
                 return response
                 print(f"Sent: {response} to {channel}")
             else:
-                response = f"PRIVMSG {channel} :[\x0304Sed\x03] No matching message found to correct from {target_nickname}\r\n"
+                response = f"[\x0304Sed\x03] No matching message found to correct from {target_nickname}\r\n"
                 return response
                 print(f"Sent: {response} to {channel}")
 
         else:
-            response = f"PRIVMSG {channel} :[\x0304Sed\x03] No message history found for the channel\r\n"
+            response = f"[\x0304Sed\x03] No message history found for the channel\r\n"
             return response
             print(f"Sent: {response} to {channel}")
 
     except re.error as e:
-        response = f"PRIVMSG {channel} :[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
+        response = f"[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
         return response
         print(f"Sent: {response} to {channel}")
     except ValueError:
-        response = f"PRIVMSG {channel} :[\x0304Sed\x03] Invalid sed command format\r\n"
+        response = f"[\x0304Sed\x03] Invalid sed command format\r\n"
         return response
         print(f"Sent: {response} to {channel}")
