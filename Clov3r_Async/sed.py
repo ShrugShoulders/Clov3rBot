@@ -3,16 +3,26 @@ import asyncio
 
 
 async def handle_sed_command(channel, sender, content, last_messages):
+    separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=']
     try:
-        match = re.match(r'[sS]/(.*?)/(.*?)(?:/([gi]*))?(/(\d*))?(?:/(.*))?$', content.replace(r'\/', '__SLASH__'))
+        # Escape all separators in the list
+        separators = ''.join(map(re.escape, separator_list))
+
+        # Replace escaped separators with placeholders
+        content = re.sub(r'\\([' + re.escape(''.join(separator_list)) + '])', lambda m: f'__SEP__', content)
+
+        # Build the regular expression pattern
+        match = re.match(fr'[sS]([{separators}])(.*?)(\1)(.*?)(?:\1([gi]*))?(\1(\d*))?(?:\1(.*))?$', content)
+
         character_limit = 460
         if match:
-            old, new, flags, _, occurrence, target_nickname = match.groups()  # Adjusted unpacking to match the new group structure
+            # Extract groups from the match
+            separator, old, _, new, flags, _, occurrence, target_nickname = match.groups()
             flags = flags if flags else ''  # Ensure flags are set to an empty string if not provided
-            occurrence = int(occurrence) if occurrence else 0  # Convert occurrence to an integer if provided, defaulting to 0
+
             # Unescape slashes that were replaced
-            old = old.replace("__SLASH__", "/")
-            new = new.replace("__SLASH__", "/")
+            old = old.replace('__SEP__', separator)
+            new = new.replace('__SEP__', separator)
 
             # Check for word boundaries flag
             word_boundaries = r'\b' if '\\b' in old else ''
@@ -26,8 +36,15 @@ async def handle_sed_command(channel, sender, content, last_messages):
             # Update the regular expression with word boundaries
             regex_pattern = fr'{word_boundaries}{old}{word_boundaries}'
 
+            # Replace the placeholder with the actual separator
+            regex_pattern = regex_pattern.replace('__SEP__', separator)
+
+            # Print the separator
+            print(f"Separator: {separator}")
+
         else:
-            raise ValueError("Invalid sed command format")
+            print("Not A Valid Sed Command")
+            return
 
         # Check if the channel key exists in self.last_messages
         if channel in last_messages:
@@ -43,7 +60,7 @@ async def handle_sed_command(channel, sender, content, last_messages):
                 if target_nickname and original_sender != target_nickname:
                     continue
 
-                if re.match(r'^[sS]/.*/.*/?[gi]*\d*$', original_message):
+                if re.match(fr'^[sS][{separators}].*[{separators}].*[{separators}]?[gi]*\d*$', original_message):
                     continue
 
                 if old in ["*", "$", "^"]:
