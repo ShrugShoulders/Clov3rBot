@@ -20,7 +20,7 @@ async def handle_sed_command(channel, sender, content, last_messages):
             separator, old, _, new, flags, _, occurrence, target_nickname = match.groups()
             flags = flags if flags else ''  # Ensure flags are set to an empty string if not provided
 
-            # Unescape slashes that were replaced
+            # Unescape separators that were replaced
             old = old.replace('__SEP__', separator)
             new = new.replace('__SEP__', separator)
 
