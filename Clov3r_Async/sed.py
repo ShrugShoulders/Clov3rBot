@@ -3,7 +3,9 @@ import asyncio
 
 
 async def handle_sed_command(channel, sender, content, last_messages):
-    separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=']
+    separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}', 'f', 
+                      'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+                      '$', ',', "'", '"', '\\', '/', '\'', '\"']
     try:
         # Escape all separators in the list
         separators = ''.join(map(re.escape, separator_list))
@@ -20,7 +22,7 @@ async def handle_sed_command(channel, sender, content, last_messages):
             separator, old, _, new, flags, _, occurrence, target_nickname = match.groups()
             flags = flags if flags else ''  # Ensure flags are set to an empty string if not provided
 
-            # Unescape separators that were replaced
+            # Unescape slashes that were replaced
             old = old.replace('__SEP__', separator)
             new = new.replace('__SEP__', separator)
 
