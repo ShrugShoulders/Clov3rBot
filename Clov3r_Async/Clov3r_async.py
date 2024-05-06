@@ -202,6 +202,7 @@ class IRCBot:
 
                 await self.send(f'USER {self.nickname} 0 * :{self.nickname}')
                 await self.send(f'NICK {self.nickname}')
+                await self.send('CAP LS 302')
                 await self.identify_with_sasl()
                 break
             except NameInUseError as e:
@@ -220,7 +221,7 @@ class IRCBot:
         SASL_successful = False
         logged_in = False
         motd_received = False
-        await self.send('CAP LS 302')
+        #await self.send('CAP LS 302')
 
         while True:
             data = await self.reader.read(4096)
