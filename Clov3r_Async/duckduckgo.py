@@ -2,7 +2,7 @@ from duckduckgo_search import DDGS
 
 def duck_search(query, channel):
     # List of channels with safesearch off
-    channels_with_safesearch_off = ['##rudechat']
+    channels_with_safesearch_off = ['##', '##gnu/crack', '##rudechat']
     
     # Determine safesearch setting based on the channel
     if channel in channels_with_safesearch_off:
@@ -34,7 +34,7 @@ def duck_search(query, channel):
         print(f"An error occurred: {e}")
         return
 
-def duck_translate(args):
+def duck_translate(args, is_url=False):
     try:
         split_args = args.split()
         if split_args and split_args[-1].startswith('-'):
@@ -54,7 +54,11 @@ def duck_translate(args):
             translated_text = result[0]['translated']
             original_text = result[0]['original']
             
-            formatted_result = (f"Translated ({lang}): {translated_text}")
+            if is_url == True:
+                formatted_result = (f"{translated_text}")
+            else:
+                formatted_result = (f"Translated ({detected_language})->({lang}): {translated_text}")
+                
             print(formatted_result)
             return formatted_result
         else:
@@ -63,3 +67,5 @@ def duck_translate(args):
     except Exception as e:
         print(f"An error occurred: {e}")
         return
+
+#exception=AssertionError(
