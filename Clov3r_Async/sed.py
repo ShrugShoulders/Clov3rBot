@@ -3,9 +3,7 @@ import asyncio
 
 
 async def handle_sed_command(channel, sender, content, last_messages):
-    separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}', 'f', 
-                      'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
-                      '$', ',', "'", '"', '\\', '/', '\'', '\"']
+    separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}','$', ',', "'", '"', '/', '\'', '\"']
     try:
         # Escape all separators in the list
         separators = ''.join(map(re.escape, separator_list))
@@ -78,7 +76,7 @@ async def handle_sed_command(channel, sender, content, last_messages):
                         # Function to replace only the specified occurrence
                         def replace_nth(match):
                             nonlocal occurrence
-                            occurrence -= 1
+                            occurrence = int(occurrence) - 1  # Convert occurrence to integer before subtraction
                             return new if occurrence == 0 else match.group(0)
 
                         replaced_message = re.sub(regex_pattern, replace_nth, original_message, flags=regex_flags)
