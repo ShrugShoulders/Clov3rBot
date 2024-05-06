@@ -221,6 +221,7 @@ class IRCBot:
         logged_in = False
         motd_received = False
         await self.send('CAP LS 302')
+        await self.send('CAP REQ :sasl')
 
         while True:
             data = await self.reader.read(4096)
