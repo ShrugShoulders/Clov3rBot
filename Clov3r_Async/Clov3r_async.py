@@ -22,10 +22,9 @@ from help import get_available_commands
 from title_scrape import Titlescraper
 from google_api import Googlesearch
 from duckduckgo import duck_search, duck_translate
-from reddit_urls import parse_reddit_url
 
 class IRCBot:
-    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, channels_features=None, ignore_list_file=None):
+    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, sasl_enabled=True, channels_features=None, ignore_list_file=None):
         self.nickname = nickname
         self.channels_features = channels_features
         self.channels = channels if isinstance(channels, list) else [channels]
@@ -34,6 +33,7 @@ class IRCBot:
         self.port = port
         self.use_ssl = use_ssl
         self.admin_list = set(admin_list) if admin_list else set()
+        self.sasl_enabled = sasl_enabled
         self.last_messages = {channel: deque(maxlen=200) for channel in channels}
         self.mushroom_facts = []
         self.ignore_list = []
@@ -65,6 +65,7 @@ class IRCBot:
         admin_list = config.get('AdminConfig', 'admin_list', fallback='').split(',')
         channels = bot_config.get('channels').split(',')
         nickserv_password = bot_config.get('nickserv_password', fallback=None)
+        sasl_enabled = bot_config.getboolean('enable_sasl', fallback=True)
 
         return cls(
             nickname=bot_config.get('nickname'),
@@ -74,7 +75,8 @@ class IRCBot:
             port=int(bot_config.get('port', 6697)),
             use_ssl=bot_config.getboolean('use_ssl', True),
             admin_list=admin_list,
-            nickserv_password=nickserv_password
+            nickserv_password=nickserv_password,
+            sasl_enabled=sasl_enabled
         )
 
     async def handle_channel_features(self, channel, command):
@@ -202,7 +204,6 @@ class IRCBot:
 
                 await self.send(f'USER {self.nickname} 0 * :{self.nickname}')
                 await self.send(f'NICK {self.nickname}')
-                await self.send('CAP LS 302')
                 await self.identify_with_sasl()
                 break
             except NameInUseError as e:
@@ -221,7 +222,7 @@ class IRCBot:
         SASL_successful = False
         logged_in = False
         motd_received = False
-        #await self.send('CAP LS 302')
+        await self.send('CAP LS 302')
 
         while True:
             data = await self.reader.read(4096)
@@ -267,7 +268,7 @@ class IRCBot:
                         if logged_in and SASL_successful:
                             for channel in self.channels:
                                 await self.join_channel(channel)
-                            print("Joined channels on MOTD.")
+                            print("Joined channels after SASL authentication.")
                             return
 
                     case "433":
@@ -695,194 +696,110 @@ class IRCBot:
                         case '.ping':
                             # PNOG
                             # Update last command time
-                            if hostmask in self.admin_list:
-                                response = f"PRIVMSG {channel} :[\x0303Ping\x03] {sender}: PNOG!"
-                                await self.send(response)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                response = f"PRIVMSG {channel} :[\x0303Ping\x03] {sender}: PNOG!"
-                                await self.send(response)
+                            self.last_command_time[sender] = time.time()
+                            response = f"PRIVMSG {channel} :[\x0303Ping\x03] {sender}: PNOG!"
+                            await self.send(response)
 
                         case '.yt':
-                            if hostmask in self.admin_list:
-                                response = self.search.process_youtube_search(args)
-                                await self.response_queue.put((channel, response))
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                response = self.search.process_youtube_search(args)
-                                await self.response_queue.put((channel, response))
+                            response = self.search.process_youtube_search(args)
+                            await self.response_queue.put((channel, response))
 
                         case '.tr':
-                            if hostmask in self.admin_list:
-                                response = duck_translate(args)
-                                await self.response_queue.put((channel, response))
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                response = duck_translate(args)
-                                await self.response_queue.put((channel, response))
+                            response = duck_translate(args)
+                            await self.response_queue.put((channel, response))
 
                         case '.g':
-                            if hostmask in self.admin_list:
-                                response = self.search.google_it(args)
-                                await self.response_queue.put((channel, response))
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                response = self.search.google_it(args)
-                                await self.response_queue.put((channel, response))
+                            response = self.search.google_it(args)
+                            await self.response_queue.put((channel, response))
 
                         case '.ddg':
-                            if hostmask in self.admin_list:
-                                response = duck_search(args, channel)
-                                await self.response_queue.put((channel, response))
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                response = duck_search(args, channel)
-                                await self.response_queue.put((channel, response))
+                            response = duck_search(args, channel)
+                            await self.response_queue.put((channel, response))
 
                         case '.quote' | '.endquote':
                             await self.handle_quote_commands(sender, channel, command, content)
 
                         case '.color':
-                            if hostmask in self.admin_list:
-                                response = await handle_color_command(sender, channel, args)
-                                await self.send(response)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                response = await handle_color_command(sender, channel, args)
-                                await self.send(response)
+                            self.last_command_time[sender] = time.time()
+                            response = await handle_color_command(sender, channel, args)
+                            await self.send(response)
 
                         case '.weather':
-                            if hostmask in self.admin_list:
-                                snag = WeatherSnag()
-                                response = await snag.get_weather(args, channel)
-                                await self.send(response)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                snag = WeatherSnag()
-                                response = await snag.get_weather(args, channel)
-                                await self.send(response)
+                            self.last_command_time[sender] = time.time()
+                            snag = WeatherSnag()
+                            response = await snag.get_weather(args, channel)
+                            await self.send(response)
 
                         case '.roll':
                             # Roll the dice
-                            if hostmask in self.admin_list:
-                                await self.dice_roll(args, channel, sender)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                await self.dice_roll(args, channel, sender)
+                            self.last_command_time[sender] = time.time()
+                            await self.dice_roll(args, channel, sender)
 
                         case '.fact':
                             # Extract the criteria from the user's command
-                            if hostmask in self.admin_list:
-                                criteria = self.extract_factoid_criteria(args)
-                                await self.send_random_mushroom_fact(channel, criteria)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                criteria = self.extract_factoid_criteria(args)
-                                await self.send_random_mushroom_fact(channel, criteria)
+                            self.last_command_time[sender] = time.time()
+                            criteria = self.extract_factoid_criteria(args)
+                            await self.send_random_mushroom_fact(channel, criteria)
 
                         case '.tell':
                             # Save a message for a user
-                            if hostmask in self.admin_list:
-                                await self.handle_tell_command(channel, sender, content)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                await self.handle_tell_command(channel, sender, content)
+                            self.last_command_time[sender] = time.time()
+                            await self.handle_tell_command(channel, sender, content)
 
                         case '.info':
-                            if hostmask in self.admin_list:
-                                await self.handle_info_command(channel, sender)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                await self.handle_info_command(channel, sender)
+                            self.last_command_time[sender] = time.time()
+                            await self.handle_info_command(channel, sender)
 
                         case '.moo':
-                            if hostmask in self.admin_list:
-                                response = "Hi cow!"
-                                await self.send(f'PRIVMSG {channel} :{response}\r\n')
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                response = "Hi cow!"
-                                await self.send(f'PRIVMSG {channel} :{response}\r\n')
+                            self.last_command_time[sender] = time.time()
+                            response = "Hi cow!"
+                            await self.send(f'PRIVMSG {channel} :{response}\r\n')
 
                         case '.moof':
-                            if hostmask in self.admin_list:
-                                await self.send_dog_cow_message(channel)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                await self.send_dog_cow_message(channel)
+                            self.last_command_time[sender] = time.time()
+                            await self.send_dog_cow_message(channel)
 
                         case '.topic':
                             # Get and send the channel topic
-                            if hostmask in self.admin_list:
-                                await self.get_channel_topic(channel)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                await self.get_channel_topic(channel)
+                            self.last_command_time[sender] = time.time()
+                            await self.get_channel_topic(channel)
 
                         case '.help':
                             # Handle the help command
-                            if hostmask in self.admin_list:
-                                await self.help_command(channel, sender, args, hostmask)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                await self.help_command(channel, sender, args, hostmask)
+                            self.last_command_time[sender] = time.time()
+                            await self.help_command(channel, sender, args, hostmask)
 
                         case '.seen':
                             # Handle the !seen command
-                            if hostmask in self.admin_list:
-                                await self.seen_command(channel, sender, content)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                await self.seen_command(channel, sender, content)
+                            self.last_command_time[sender] = time.time()
+                            await self.seen_command(channel, sender, content)
 
                         case '.last':
-                            if hostmask in self.admin_list:
-                                await self.last_command(channel, sender, content)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                await self.last_command(channel, sender, content)
+                            self.last_command_time[sender] = time.time()
+                            await self.last_command(channel, sender, content)
 
                         case '.version':
-                            if hostmask in self.admin_list:
-                                version = "Clov3rBot Version 6.66666"
-                                response = f"PRIVMSG {channel} :{version}"
-                                await self.send(response)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                version = "Clov3rBot Version 6.66666"
-                                response = f"PRIVMSG {channel} :{version}"
-                                await self.send(response)
+                            self.last_command_time[sender] = time.time()
+                            version = "Clov3rBot Version 6.66666"
+                            response = f"PRIVMSG {channel} :{version}"
+                            await self.send(response)
 
                         case '.rollover':
+                            self.last_command_time[sender] = time.time()
                             # Perform the rollover action
-                            if hostmask in self.admin_list:
-                                barking_action = f"PRIVMSG {channel} :woof woof!"
-                                action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
-                                await self.send(barking_action)
-                                await self.send(action_message)
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                barking_action = f"PRIVMSG {channel} :woof woof!"
-                                action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
-                                await self.send(barking_action)
-                                await self.send(action_message)
+                            barking_action = f"PRIVMSG {channel} :woof woof!"
+                            action_message = f"PRIVMSG {channel} :\x01ACTION rolls over\x01"
+                            await self.send(barking_action)
+                            await self.send(action_message)
 
                         case '.stats':
+                            self.last_command_time[sender] = time.time()
                             # Handle the !stats command
-                            if hostmask in self.admin_list:
-                                await self.stats_command(channel, sender, content)
-                            else:                  
-                                self.last_command_time[sender] = time.time()
-                                await self.stats_command(channel, sender, content)
+                            await self.stats_command(channel, sender, content)
 
                         case '.bug':
-                            if hostmask in self.admin_list:
-                                response = get_bug_details(args)
-                                await self.send(f"PRIVMSG {channel} :{response}")
-                            else:
-                                self.last_command_time[sender] = time.time()
-                                response = get_bug_details(args)
-                                await self.send(f"PRIVMSG {channel} :{response}")
+                            response = get_bug_details(args)
+                            await self.send(f"PRIVMSG {channel} :{response}")
 
                         case '.factadd' if hostmask in self.admin_list:
                             # Handle the !factadd command
