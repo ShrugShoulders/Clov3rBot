@@ -6,6 +6,7 @@ import requests
 import ipaddress
 import html
 import http.client
+import ssl
 import io
 import os
 import magic
@@ -18,11 +19,14 @@ from requests.exceptions import HTTPError, Timeout, RequestException
 from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
 from PIL import Image
+from gentoo_bugs import get_bug_details
+from reddit_urls import parse_reddit_url
+
 
 class Titlescraper:
     def __init__(self):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0', 'Accept-Encoding': 'identity'}
-        self.api_key = ""
+        self.api_key = "AIzaSyBYmiMXJunZXnSovbRIoYszlgf9V_YQCu8"
         self.youtube_service = build('youtube', 'v3', developerKey=self.api_key)
 
     async def sanitize_input(self, malicious_input):
@@ -52,126 +56,142 @@ class Titlescraper:
 
     async def extract_webpage_title(self, url, redirect_limit=25):
         REQUEST_TIMEOUT = 10
-        parsed_url = urlparse(url)
-        connection = http.client.HTTPConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT)
-        EXECUTABLE_FILE_EXTENSIONS = ['.exe', '.dll', '.jar', '.iso']
+        ignore_ssl_errors = False  # Flag to indicate whether to ignore SSL errors
+        headers = self.headers  # Define headers with User-Agent
 
-        # Define headers with User-Agent
-        headers = self.headers
-
-        try:
-            # Include the headers in the request
-            connection.request("GET", parsed_url.path or '/', headers=headers)
-            response = connection.getresponse()
-
-            # Follow redirects if status code is 301 or 302, up to a limit
-            num_redirects = 0
-            while response.status in [301, 302, 303] and num_redirects < redirect_limit:
-                num_redirects += 1
-                new_location = response.getheader('Location')
-                if not new_location:
-                    return "Error: No location for redirect"
-                parsed_url = urlparse(new_location)
-                connection = http.client.HTTPConnection(parsed_url.netloc) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc)
-                # Include the headers again for the new request after redirect
-                connection.request("GET", parsed_url.path or '/', headers=headers)
+        for attempt in range(2):  # Attempt connection with possible retry for SSL error
+            try:
+                parsed_url = urlparse(url)  # Re-parse URL on retry
+                if parsed_url.scheme == 'http':
+                    connection = http.client.HTTPConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT)
+                else:
+                    if ignore_ssl_errors:
+                        # Create an unverified SSL context
+                        context = ssl._create_unverified_context()
+                        connection = http.client.HTTPSConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT, context=context)
+                    else:
+                        connection = http.client.HTTPSConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT)
+                
+                connection.request("GET", parsed_url.path or '/', headers=headers)  # Include the headers in the request
                 response = connection.getresponse()
 
-            if response.status in [400, 404, 401, 405, 403]:
-                print(f"GET request failed with {response.status}")
-                e = f"{response.status}"
-                self.save_no_title(url, e)
-                return
-            elif response.status == 200:
-                content_bytes = response.read(2048)
-                content_type = magic.from_buffer(content_bytes, mime=True)
-                print(f"{content_type}")
-                
-                if content_type in ['application/octet-stream', 'application/zip', 'text/plain']:
-                    if url.endswith(('.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.mha', '.mhm', '.aiff', '.alac', '.opus', '.spx', '.amr', '.ac3', '.dsf', '.dff', '.ape')):
-                        return await self.handle_audio_file(url)
-                    elif url.endswith(('.bat', '.toml', '.sh')):
-                        return await self.handle_script(url, content_type)
-                else:
-                    pass
+                # Follow redirects if status code is 301 or 302, up to a limit
+                num_redirects = 0
+                while response.status in [301, 302, 303] and num_redirects < redirect_limit:
+                    num_redirects += 1
+                    new_location = response.getheader('Location')
+                    if not new_location:
+                        return "Error: No location for redirect"
+                    parsed_url = urlparse(new_location)
+                    connection = http.client.HTTPConnection(parsed_url.netloc) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc)
+                    # Include the headers again for the new request after redirect
+                    connection.request("GET", parsed_url.path or '/', headers=headers)
+                    response = connection.getresponse()
 
-                #content_type = response.getheader('Content-Type', '').lower()
-                charset = 'utf-8'
-                if 'charset' in content_type.lower():
-                    charset = charset = content_type.split('charset=')[-1].split(';')[0]
-                content_length = int(response.getheader('Content-Length', 0))
-                MAX_FILE_SIZE = 256 * 1024 * 1024  # 256 MB
-
-                if content_type.startswith('image/'):
-                    return await self.handle_image_url(url)
-                elif content_type.startswith('video/'):
-                    return await self.handle_video_file(url)
-                elif content_type in ['text/plain', 'text/rtf', 'text/richtext']:
-                    return await self.handle_text_file(url)
-                elif content_type.startswith(('text/x-', 'application/x-')) or content_type in ['application/perl', 'application/x-python-code', 'application/javascript', 'text/css', 'application/json', 'text/vnd.curl', 'application/typescript', 'application/xml', 'text/xml', 'application/toml']:
-                    return await self.handle_script(url, content_type)
-                elif content_type.startswith('audio/'):
-                    return await self.handle_audio_file(url)
-                elif content_type == 'application/pdf':
-                    return await self.handle_pdf_file(url)
-                elif content_type in ['application/octet-stream', 'application/zip']:
-                    return await self.handle_gzip(url)
-                elif content_type == 'application/x-iso9660-image':
-                    return "ISO"
-                elif content_type.startswith('text/html'):
-                    remaining_content_bytes = response.read()
-                    full_content = content_bytes + remaining_content_bytes
-                    
-                    decoded_content = full_content.decode('utf-8', errors='ignore')
-                    soup = BeautifulSoup(decoded_content, 'html.parser')
-
-                    title_tag = soup.find('title')
-                    title = title_tag.text if title_tag else None
-
-                    if title:
-                        print(f"Extracted title tag: {title}")
-                        return f"[\x0303Website\x03] {title}"
-                    else:
-                        meta_name_title_tag = soup.find('meta', {'name': 'title'})
-                        meta_name_title = meta_name_title_tag['content'] if meta_name_title_tag else None
-
-                        if meta_name_title:
-                            print(f"Extracted meta name=title: {meta_name_title}")
-                            return f"[\x0303Website\x03] {meta_name_title}"
-                        else:
-                            og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
-                            og_title = og_title_tag['content'] if og_title_tag else None
-
-                            if og_title:
-                                print(f"Extracted og:title: {og_title}")
-                                return f"[\x0303Website\x03] {og_title}"
-                            else:
-                                print(f"Title not found")
-                                e = f"extract_webpage_title could not find title for {url}"
-                                self.handle_title_not_found(url, e)
-
-                elif content_length > MAX_FILE_SIZE:
-                    e = f"Max Size"
-                    self.handle_title_not_found(url, e)
-                    return 
-                elif any(url.lower().endswith(ext) for ext in EXECUTABLE_FILE_EXTENSIONS):
-                    e = f"Banned File Type"
-                    self.handle_title_not_found(url, e)
-                    return 
-                else:
-                    e = f"Unknown mime/type {content_type}"
-                    self.handle_title_not_found(url, e)
+                if response.status in [400, 404, 401, 405, 403]:
+                    print(f"GET request failed with {response.status}")
+                    e = f"{response.status}"
+                    self.save_no_title(url, e)
                     return
-            else:
-                return
-        except socket.timeout:
-            print(f"Request timed out for {url}")
-            # Handle the timeout appropriately, maybe by logging or notifying the user
-        except http.client.HTTPException as e:
-            print(f"Error retrieving webpage title for {url}: {e}")
-            # Handle other HTTP exceptions as before
-        finally:
-            connection.close()
+                elif response.status == 200:
+                    content_bytes = response.read(2048)
+                    content_type = magic.from_buffer(content_bytes, mime=True)
+                    print(f"{content_type}")
+                    
+                    if content_type in ['application/octet-stream', 'application/zip', 'text/plain']:
+                        if url.endswith(('.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.mha', '.mhm', '.aiff', '.alac', '.opus', '.spx', '.amr', '.ac3', '.dsf', '.dff', '.ape')):
+                            return await self.handle_audio_file(url)
+                        elif url.endswith(('.bat', '.toml', '.sh')):
+                            return await self.handle_script(url, content_type)
+                    else:
+                        pass
+
+                    #content_type = response.getheader('Content-Type', '').lower()
+                    charset = 'utf-8'
+                    if 'charset' in content_type.lower():
+                        charset = charset = content_type.split('charset=')[-1].split(';')[0]
+                    content_length = int(response.getheader('Content-Length', 0))
+                    MAX_FILE_SIZE = 256 * 1024 * 1024  # 256 MB
+
+                    if content_type.startswith('image/'):
+                        return await self.handle_image_url(url)
+                    elif content_type.startswith('video/'):
+                        return await self.handle_video_file(url)
+                    elif content_type in ['text/plain', 'text/rtf', 'text/richtext']:
+                        return await self.handle_text_file(url)
+                    elif content_type.startswith(('text/x-', 'application/x-')) or content_type in ['application/perl', 'application/x-python-code', 'application/javascript', 'text/css', 'application/json', 'text/vnd.curl', 'application/typescript', 'application/xml', 'text/xml', 'application/toml']:
+                        return await self.handle_script(url, content_type)
+                    elif content_type.startswith('audio/'):
+                        return await self.handle_audio_file(url)
+                    elif content_type == 'application/pdf':
+                        return await self.handle_pdf_file(url)
+                    elif content_type in ['application/octet-stream', 'application/zip']:
+                        return await self.handle_gzip(url)
+                    elif content_type == 'application/x-iso9660-image':
+                        return "ISO"
+                    elif content_type.startswith('text/html'):
+                        remaining_content_bytes = response.read()
+                        full_content = content_bytes + remaining_content_bytes
+                        
+                        decoded_content = full_content.decode(charset, errors='ignore')
+                        soup = BeautifulSoup(decoded_content, 'html.parser')
+
+                        title_tag = soup.find('title')
+                        title = title_tag.text.strip() if title_tag else None
+
+                        if title:
+                            print(f"Extracted title tag: {title}")
+                            return f"[\x0303Website\x03] {title}"
+                        else:
+                            meta_name_title_tag = soup.find('meta', {'name': 'title'})
+                            meta_name_title = meta_name_title_tag['content'].strip() if meta_name_title_tag else None
+
+                            if meta_name_title:
+                                print(f"Extracted meta name=title: {meta_name_title}")
+                                return f"[\x0303Website\x03] {meta_name_title}"
+                            else:
+                                og_title_tag = soup.find('meta', attrs={'property': 'og:title'})
+                                og_title = og_title_tag['content'].strip() if og_title_tag else None
+
+                                if og_title:
+                                    print(f"Extracted og:title: {og_title}")
+                                    return f"[\x0303Website\x03] {og_title}"
+                                else:
+                                    print(f"Title not found")
+                                    e = f"extract_webpage_title could not find title for {url}"
+                                    self.handle_title_not_found(url, e)
+
+                    elif content_length > MAX_FILE_SIZE:
+                        e = f"Max Size"
+                        self.handle_title_not_found(url, e)
+                        return 
+                    elif any(url.lower().endswith(ext) for ext in EXECUTABLE_FILE_EXTENSIONS):
+                        e = f"Banned File Type"
+                        self.handle_title_not_found(url, e)
+                        return 
+                    else:
+                        e = f"Unknown mime/type {content_type}"
+                        self.handle_title_not_found(url, e)
+                        return
+                else:
+                    return
+            except socket.timeout:
+                print(f"Request timed out for {url}")
+                # Handle timeout, potentially with a 'break' or 'continue' depending on your retry logic
+            except ssl.SSLCertVerificationError:
+                if attempt == 0:
+                    print("SSL certificate verification failed. Retrying with verification disabled.")
+                    ignore_ssl_errors = True
+                    # Continue to retry the connection
+                    continue
+                else:
+                    raise
+            except http.client.HTTPException as e:
+                print(f"Error retrieving webpage title for {url}: {e}")
+                # Handle HTTP exceptions here
+                break
+            finally:
+                connection.close()
 
     def format_file_size(self, size_in_bytes):
         for unit in ['B', 'KB', 'MB', 'GB']:
@@ -180,22 +200,6 @@ class Titlescraper:
             size_in_bytes /= 1024.0
 
         return f"{size_in_bytes:.2f} TB"
-
-    async def process_reddit_url(self, url):
-        try:
-            response = requests.get(url, headers=self.headers)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                title_tag = soup.find('title')
-                if title_tag:
-                    return f"[\x0303Website\x03] {title_tag.text}"
-                else:
-                    return "Title not found"
-            else:
-                print(f"Error: Response status {response.status_code}")
-                return
-        except Exception as e:
-            return f"Error: {str(e)}"
 
     async def process_url(self, url):
         parsed_url = urlparse(url)
@@ -210,13 +214,19 @@ class Titlescraper:
         elif hostname in ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com']:
             return await self.process_youtube_video(url)
         elif hostname in ['reddit.com', 'www.reddit.com']:
-            old_reddit_url = url.replace(hostname, 'old.reddit.com')
-            return await self.process_reddit_url(old_reddit_url)
+            return await parse_reddit_url(url)
         elif hostname == 'dpaste.com':
             raw_text_url = f"{url}.txt" if not url.endswith('.txt') else url
             return await self.sanitize_input(await self.extract_webpage_title(raw_text_url))
+        elif hostname == 'bugs.gentoo.org':
+            return await self.handle_gentoo_bugs(url)
         else:
-            return await self.sanitize_input(await self.extract_webpage_title(url))
+            return await self.sanitize_input(await self.extract_webpage_title(url)) # https://bugs.gentoo.org/902829
+
+    async def handle_gentoo_bugs(self, url):
+        bug_number = url.split('/')[-1]
+        response = get_bug_details(bug_number)
+        return response
 
     async def process_youtube_video(self, url):
         loop = asyncio.get_event_loop()
@@ -257,7 +267,7 @@ class Titlescraper:
         # Check if the cache file exists and is less than 24 hours old
         if os.path.exists(cache_file_path):
             file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file_path))
-            if datetime.now() - file_mod_time < timedelta(hours=8):
+            if datetime.now() - file_mod_time < timedelta(hours=72):
                 with open(cache_file_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
         
@@ -281,31 +291,36 @@ class Titlescraper:
 
     def format_video_data(self, video_data):
         title = video_data['snippet']['title']
+        uploader = video_data['snippet']['channelTitle']
         live = video_data['snippet']['liveBroadcastContent']
-        viewCount = video_data['statistics'].get('viewCount', '0')
-        likeCount = video_data['statistics'].get('likeCount', '0')
-        favoriteCount = video_data['statistics'].get('favoriteCount', '0')
-        commentCount = video_data['statistics'].get('commentCount')
         duration = video_data['contentDetails']['duration']
-        cleaned_duration = duration.lstrip('PT')
-
-        formatted_parts = [f"Title: \x02{title}\x0F"]
+        
+        # Use regular expressions to find hours, minutes, and seconds
+        hours = re.search(r'(\d+)H', duration)
+        minutes = re.search(r'(\d+)M', duration)
+        seconds = re.search(r'(\d+)S', duration)
+        
+        # Convert matches to integers, or default to 0 if not found
+        hours_value = int(hours.group(1)) if hours else 0
+        minutes_value = int(minutes.group(1)) if minutes else 0
+        seconds_value = int(seconds.group(1)) if seconds else 0
+        
+        formatted_parts = [f"\x02{title}\x0F"]
         if live and live != 'none':
-            formatted_parts.append("- LIVE NOW!")
+            formatted_parts.append("\x0304LIVE!\x0F")
         else:
-            formatted_parts.append(f"({cleaned_duration})")
+            # Format the duration, including hours if present
+            if hours_value > 0:
+                formatted_duration = f"\x02{hours_value}h:{minutes_value:02d}m:{seconds_value:02d}s\x0F"
+            else:
+                formatted_duration = f"\x02{minutes_value}m:{seconds_value:02d}s\x0F"
+            formatted_parts.append(formatted_duration)
+            
+        if uploader:
+            formatted_parts.append(f"\x02{uploader}\x0F")
         
-        if viewCount and viewCount != '0':
-            formatted_parts.append(f"Views: \x1F{viewCount}\x0F")
-        if likeCount and likeCount != '0':
-            formatted_parts.append(f"Likes: \x1D{likeCount}\x0F")
-        if favoriteCount and favoriteCount != '0':
-            formatted_parts.append(f"Favorites: \x0303\x02{favoriteCount}\x0F")
-        if commentCount and commentCount != '0':
-            formatted_parts.append(f"Comments: \x0307\x02{commentCount}\x0F")
-        
-        formatted_data = " ".join(formatted_parts)
-        return f"[\x0301,00\x02You\x0300,04\x02Tube\x03] {formatted_data}"
+        formatted_data = " | ".join(formatted_parts)
+        return f"[\x0301,00\x02You\x0300,04\x02Tube\x03]\x0F {formatted_data}"
 
     def process_amazon_url(self, url):
         product_name = " ".join(url.split('/')[3].split('-')).title()
@@ -364,11 +379,11 @@ class Titlescraper:
                     for chunk in pdf_response.iter_content(chunk_size=8192):
                         pdf_file.write(chunk)
 
-                response = f"[\x0313PDF file\x03] {site_name} {file_identifier}: {formatted_size}"
+                response = f"[\x0313PDF file\x03] {file_identifier}: {formatted_size}"
             except Exception as e:
                 print(f"Unable to download the PDF file: {e}")
         else:
-            response = f"[\x0304PDF file\x03] {site_name} {file_identifier}: Size Unknown"
+            response = f"[\x0304PDF file\x03] {file_identifier}: Size Unknown"
 
         return response
 
@@ -385,10 +400,10 @@ class Titlescraper:
         if file_size_bytes is not None:
             file_size_bytes = int(file_size_bytes)  # Convert to integer
             formatted_size = self.format_file_size(file_size_bytes)
-            response = f"[\x0313Compressed file\x03] {site_name} {file_identifier}: {formatted_size}"
+            response = f"[\x0313Compressed file\x03] {file_identifier}: {formatted_size}"
             return response
         else:
-            return f"[\x0304Compressed file\x03] {site_name} {file_identifier}: Size Unknown"
+            return f"[\x0304Compressed file\x03] {file_identifier}: Size Unknown"
 
     async def handle_video_file(self, url):
         site_name = url.split('/')[2]
@@ -423,11 +438,11 @@ class Titlescraper:
                     for chunk in video_response.iter_content(chunk_size=8192):
                         video_file.write(chunk)
 
-                response = f"[\x0307Video file\x03] {site_name} {paste_code}: {formatted_size}"
+                response = f"[\x0307Video file\x03] {paste_code}: {formatted_size}"
             except Exception as e:
                 print(f"Unable to download the video file: {e}")
         else:
-            response = f"[\x0304Video file\x03] {site_name} {paste_code}: Size Unknown"
+            response = f"[\x0304Video file\x03] {paste_code}: Size Unknown"
 
         return response
 
@@ -466,7 +481,7 @@ class Titlescraper:
             formatted_image_size = "unknown size"
             image_dimensions = "N/A"
         
-        return f"[\x0311Image File\x03] {site_name} {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
+        return f"[\x0311Image File\x03] {paste_code} - Size: {image_dimensions}/{formatted_image_size}"
 
     async def handle_audio_file(self, url):
         site_name = url.split('/')[2]
@@ -492,7 +507,7 @@ class Titlescraper:
                 for chunk in audio_response.iter_content(chunk_size=8192):
                     audio_file.write(chunk)
 
-            response = f"[\x0307Audio File\x03] {site_name} {paste_code} - Size: {formatted_audio_size}"
+            response = f"[\x0307Audio File\x03] {paste_code} - Size: {formatted_audio_size}"
         except Exception as e:
             print(f"Error fetching and saving audio file: {e}")
 
