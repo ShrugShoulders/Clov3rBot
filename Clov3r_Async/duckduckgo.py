@@ -37,16 +37,24 @@ def duck_search(query, channel):
 def duck_translate(args, is_url=False):
     try:
         split_args = args.split()
-        if split_args and split_args[-1].startswith('-'):
-            lang = split_args[-1][1:]  # Extract language code, excluding the dash
-            query = " ".join(split_args[:-1])
-        else:
-            lang = 'en'  # Default to English
-            query = " ".join(split_args)
+        from_lang = None
+        to_lang = 'en'  # Default target language
+        
+        # Check if there are language codes specified in the command
+        for arg in split_args:
+            if arg.startswith('+'):
+                from_lang = arg[1:]
+            elif arg.startswith('-'):
+                to_lang = arg[1:]
+        
+        # Remove language codes from the command arguments
+        clean_args = [arg for arg in split_args if not arg.startswith(('+', '-'))]
+        query = " ".join(clean_args)
 
         result = DDGS().translate(
             keywords=query,
-            to=lang
+            from_=from_lang,  # Pass the source language
+            to=to_lang,      # Pass the target language
         )
         
         if result:
@@ -54,10 +62,12 @@ def duck_translate(args, is_url=False):
             translated_text = result[0]['translated']
             original_text = result[0]['original']
             
-            if is_url == True:
-                formatted_result = (f"{translated_text}")
+            if is_url:
+                formatted_result = f"{translated_text}"
+            elif from_lang is not None:
+                formatted_result = f"Translated ({from_lang})->({to_lang}): {translated_text}"
             else:
-                formatted_result = (f"Translated ({detected_language})->({lang}): {translated_text}")
+                formatted_result = f"Translated ({detected_language})->({to_lang}): {translated_text}"
                 
             print(formatted_result)
             return formatted_result
@@ -67,5 +77,3 @@ def duck_translate(args, is_url=False):
     except Exception as e:
         print(f"An error occurred: {e}")
         return
-
-#exception=AssertionError(
