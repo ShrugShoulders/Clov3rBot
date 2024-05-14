@@ -200,6 +200,8 @@ class IRCBot:
                 else:
                     self.reader, self.writer = await asyncio.open_connection(self.server, self.port)
 
+                await self.send('CAP LS 302')
+
                 await self.send(f'USER {self.nickname} 0 * :{self.nickname}')
                 await self.send(f'NICK {self.nickname}')
                 await self.identify_with_sasl()
@@ -220,8 +222,6 @@ class IRCBot:
         SASL_successful = False
         logged_in = False
         motd_received = False
-        await self.send('CAP LS 302')
-        await self.send('CAP REQ :sasl')
 
         while True:
             data = await self.reader.read(4096)
