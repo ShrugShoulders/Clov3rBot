@@ -26,18 +26,19 @@ async def process_reddit_url(url):
 async def parse_reddit_url(normalized_content):
     url_regex = re.compile(r'https?://[^\s\x00-\x1F\x7F]+')
     match = url_regex.search(normalized_content)
+    
     if match:
         url = match.group()
         parsed_url = urlparse(url)
         hostname = parsed_url.hostname
 
-        if hostname in ['reddit.com', 'www.reddit.com']:
-            old_reddit_url = url.replace(hostname, 'old.reddit.com')
-            return await process_reddit_url(old_reddit_url)
-        elif hostname in ['www.old.reddit.com', 'old.reddit.com']:
-            return await process_reddit_url(hostname)
+        if hostname and ('reddit.com' in hostname or 'redd.it' in hostname):
+            if 'old.reddit.com' not in hostname:
+                old_reddit_url = url.replace(hostname, 'old.reddit.com')
+                return await process_reddit_url(old_reddit_url)
+            else:
+                return await process_reddit_url(url)
         else:
-            return
-            print(f"URL: {url} is not a reddit url")
+            print(f"URL: {url} is not a Reddit URL")
     else:
         pass
