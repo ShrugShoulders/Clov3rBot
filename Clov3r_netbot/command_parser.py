@@ -20,9 +20,11 @@ class CommandHandler:
     def __init__(self):
         self.server_instance = None
         self.url_regex = re.compile(r'https?://[^\s\x00-\x1F\x7F]+')
-        self.channels_features = {}  # Start with an empty dictionary
+        self.separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}','$', ',', "'", '"', '/', '\'', '\"']
+        self.channels_features = {}
+        self.processed_urls = {}
         self.search = Googlesearch()
-        self.load_channels_features()  # Load channels features initially
+        self.load_channels_features()
         self.tatle = Tell()
         self.seen = Seenme()
         self.mycelia = MushroomFacts()
@@ -31,7 +33,7 @@ class CommandHandler:
     def load_channels_features(self):
         try:
             with open("channels_features.json", 'r') as file:
-                self.channels_features = json.load(file)  # Load data into self.channels_features
+                self.channels_features = json.load(file)
             print("Channels features loaded successfully.")
         except FileNotFoundError:
             print("Error: The file 'channels_features.json' was not found.")
@@ -56,32 +58,24 @@ class CommandHandler:
 
         response = None
 
-        if content.startswith(('s', 'S')) and len(content) > 2:
+        # Create all possible prefixes with 's' and 'S'
+        prefixes = [f's{sep}' for sep in self.separator_list] + [f'S{sep}' for sep in self.separator_list]
+
+        # Check if content starts with any of the commands
+        command = content.split()[0].strip()
+        args = content[len(command):].strip()
+        command_handled = False
+
+        if any(content.startswith(prefix) for prefix in prefixes) and len(content) > 2:
             print("sed command")
             if await self.handle_channel_features(channel, '.sed'):
                 print(f"Handling sed command from {sender} in channel {channel}.")
                 response = await handle_sed_command(channel, sender, content, last_messages)
-                if response == None:
-                    pass
-                else:
-                    yield response  # Yield the response for sed command
-        elif urls:
-            if await self.handle_channel_features(channel, '.urlparse'):
-                titlescrape = Titlescraper()
-                for url in urls:
-                    try:
-                        url_response = await titlescrape.process_url(url)
-                        asyncio.sleep(1)
-                        yield url_response  # Yield each URL response individually
-                    except Exception as e:
-                        print(f"Error fetching or parsing URL: {e}")
-            elif await self.handle_channel_features(channel, '.redditparse'):
-                response = await parse_reddit_url(content)
-                yield response
-        else:
-            command = content.split()[0].strip()
-            args = content[len(command):].strip()
+                if response is not None:
+                    yield response
+                    command_handled = True
 
+        if not command_handled:
             if await self.handle_channel_features(channel, command):
                 print(f"Handling command '{command}' from {sender} in channel {channel}.")
                 match command:
@@ -134,7 +128,24 @@ class CommandHandler:
                     case '.deop' if hostmask in admin_list:
                         response = f"MODE {channel} -o {sender}\r\n"
 
-                yield response  # Yield the response for the command
+                if response is not None:
+                    yield response
+                    command_handled = True
+
+        # Now handle any URLs found in the content
+        if urls and not content.startswith('.'):
+            if await self.handle_channel_features(channel, '.urlparse'):
+                titlescrape = Titlescraper()
+                for url in urls:
+                    try:
+                        url_response = await titlescrape.process_url(url)
+                        await asyncio.sleep(1)
+                        yield url_response
+                    except Exception as e:
+                        print(f"Error fetching or parsing URL: {e}")
+            elif await self.handle_channel_features(channel, '.redditparse'):
+                response = await parse_reddit_url(content)
+                yield response
 
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
@@ -147,19 +158,6 @@ class CommandHandler:
             if (ord(char) > 31 and ord(char) != 127) or char in '\x03\x02\x0F\x16\x1E\x1D\x1F\x01'
         )
         return safe_output
-
-    def filter_private_ip(self, url):
-        # Extract the hostname from the URL
-        hostname = re.findall(r'https?://([^/:]+)', url)
-        if hostname:
-            hostname = hostname[0]
-            try:
-                ip = ipaddress.ip_address(hostname)
-                return ip.is_private  # Return True for private IP addresses
-            except ValueError:
-                pass  # Not an IP address
-
-        return False
 
     async def handle_client(self, reader, writer):
         buffer = ""
@@ -193,9 +191,8 @@ class CommandHandler:
                         writer.close()
                         await writer.wait_closed()
                         print("Connection closed.")
-                        return  # Exit the function after closing the connection
+                        return 
                     except json.JSONDecodeError:
-                        # If there's an error, continue to accumulate data
                         break
         except asyncio.CancelledError:
             print("Client connection cancelled.")
