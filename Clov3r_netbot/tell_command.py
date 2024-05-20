@@ -9,6 +9,8 @@ class Tell:
         self.load_message_queue()
 
     async def handle_tell_command(self, channel, sender, content):
+        self.message_queue = {}
+        self.load_message_queue()
         try:
             # Parse the command: !tell username message
             _, username, message = content.split(' ', 2)
@@ -67,44 +69,3 @@ class Tell:
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         return f"{days}d {hours}h {minutes}m {seconds}s"
-
-    async def send_saved_messages(self, sender, channel):
-        # Convert the sender nickname to lowercase for case-insensitive comparison
-        sender_lower = sender.lower()
-
-        # Iterate over keys in the message_queue and find matching recipients
-        for key, messages in list(self.message_queue.items()):
-            try:
-                (saved_channel, saved_recipient) = key
-            except ValueError:
-                print(f"Error unpacking key: {key}")
-                continue
-
-            # Convert the recipient nickname to lowercase for case-insensitive comparison
-            recipient_lower = saved_recipient.lower()
-
-            # Check if the lowercase nicknames match and the channels are the same
-            if sender_lower == recipient_lower and channel == saved_channel:
-                # Get the current time as offset-aware
-                current_time = datetime.datetime.now(datetime.timezone.utc)
-
-                for (username, recipient, saved_message, timestamp) in messages:
-                    # Convert the timestamp to a datetime object and make it offset-aware
-                    timestamp = timestamp.rstrip(" UTC")  # Remove ' UTC' suffix
-                    message_time_naive = datetime.datetime.fromisoformat(timestamp)
-                    # Make it offset-aware by specifying UTC timezone
-                    message_time = message_time_naive.replace(tzinfo=datetime.timezone.utc)
-
-                    # Calculate the time difference
-                    time_difference = current_time - message_time
-
-                    # Format the time difference as a human-readable string
-                    formatted_time_difference = self.format_timedelta(time_difference)
-
-                    response = f"{sender}, {formatted_time_difference} ago <{recipient}> {saved_message} \r\n"
-
-                # Clear the saved messages for the user in the specific channel
-                del self.message_queue[key]
-                await self.save_message_queue()
-                print(f"Sent saved message to {channel}: {response}")
-                return response
