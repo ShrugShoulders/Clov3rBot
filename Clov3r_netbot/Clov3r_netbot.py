@@ -9,12 +9,15 @@ import time
 import html
 import irctokens
 import re
+import ipaddress
 from tell_command import Tell
 from last_seen import Seenme
+from report_command import ReportIn
 
 
 class Clov3r:
-    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, sasl_username=None):
+    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, sasl_username=None, available_commands=None, admin_commands=None, config_file=None):
+        self.config_file = config_file
         self.nickname = nickname
         self.sasl_username = sasl_username
         self.channels = channels
@@ -26,15 +29,17 @@ class Clov3r:
         self.writer = None
         self.disconnect_requested = False
         self.response_queue = asyncio.Queue()
-        self.lock = asyncio.Lock()  # Added for the keep_alive function
+        self.lock = asyncio.Lock()
         self.last_messages = {}
         self.admin_list = admin_list
         self.url_regex = re.compile(r'https?://[^\s\x00-\x1F\x7F]+')
-        self.available_commands = ['s', 'S', '.weather', '.wx', '.w', '.help', '.fact', '.ping', '.yt', '.g', '.ddg', '.tr', '.tell', '.seen', '.stats', '.bug']
-        self.admin_commands = ['.part', '.join', '.botop', '.deop', '.op', '.quit', '.factadd']
+        self.available_commands = available_commands
+        self.admin_commands = admin_commands
+        self.separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}','$', ',', "'", '"', '/', '\'', '\"']
         self.response_track = set()
         self.speak = Tell()
         self.saw = Seenme()
+        self.report = ReportIn()
 
     @classmethod
     def from_config_file(cls, config_file):
@@ -44,6 +49,8 @@ class Clov3r:
         admin_list = config.get('AdminConfig', 'admin_list', fallback='').split(',')
         channels = bot_config.get('channels').split(',')
         nickserv_password = bot_config.get('nickserv_password', fallback=None)
+        available_commands = bot_config.get('available_commands').split(',')
+        admin_commands = bot_config.get('admin_commands').split(',')
 
         return cls(
             nickname=bot_config.get('nickname'),
@@ -53,8 +60,36 @@ class Clov3r:
             use_ssl=bot_config.getboolean('use_ssl', True),
             admin_list=admin_list,
             nickserv_password=nickserv_password,
-            sasl_username=bot_config.get('sasl_username')
+            sasl_username=bot_config.get('sasl_username'),
+            available_commands=available_commands,
+            admin_commands=admin_commands,
+            config_file=config_file
         )
+
+    def reload_config(self):
+        if not self.config_file:
+            raise ValueError("Config file path is not set.")
+        
+        config = configparser.ConfigParser()
+        config.read(self.config_file)
+        bot_config = config['BotConfig']
+        admin_list = config.get('AdminConfig', 'admin_list', fallback='').split(',')
+        channels = bot_config.get('channels').split(',')
+        nickserv_password = bot_config.get('nickserv_password', fallback=None)
+        available_commands = bot_config.get('available_commands').split(',')
+        admin_commands = bot_config.get('admin_commands').split(',')
+
+        self.nickname = bot_config.get('nickname')
+        self.channels = channels
+        self.server = bot_config.get('server')
+        self.port = int(bot_config.get('port', 6697))
+        self.use_ssl = bot_config.getboolean('use_ssl', True)
+        self.admin_list = admin_list
+        self.nickserv_password = nickserv_password
+        self.sasl_username = bot_config.get('sasl_username')
+        self.available_commands = available_commands
+        self.admin_commands = admin_commands
+        return True
 
     async def connect(self):
         while True:
@@ -252,7 +287,6 @@ class Clov3r:
         # Convert deque objects to lists for JSON serialization
         serializable_last_messages = {channel: list(messages) for channel, messages in self.last_messages.items()}
         
-        # Ensure the function is thread-safe if called concurrently
         async with self.lock:
             try:
                 with open(filename, 'w') as file:
@@ -262,11 +296,9 @@ class Clov3r:
                 print(f"Error saving last messages: {e}")
 
     async def load_last_messages(self, filename="messages.json"):
-        # Ensure the function is thread-safe if called concurrently
         async with self.lock:
             try:
                 with open(filename, 'r') as file:
-                    # Load messages from the file
                     self.last_messages = json.load(file)
                 
                 print(f"Loaded last messages from {filename}")
@@ -306,43 +338,92 @@ class Clov3r:
                         content = tokens.params[1].strip().lstrip()
                         parts = content.split()
                         normalized_content = ' '.join(parts)
-                        url = self.url_regex.findall(normalized_content)
 
                         print(f"Sender: {sender}")
                         print(f"Channel: {channel}")
                         print(f"Content: {content}")
                         print(f"Full Hostmask: {hostmask}")
                         
+                        # Check for user and admin commands
+                        for command in self.available_commands:
+                            if content.startswith(command):
+                                await self.user_commands(sender, channel, content, hostmask, self.last_messages, self.admin_list)
+                                break
+                        for command in self.admin_commands:
+                            if content.startswith(command):
+                                if command == '.quit' and hostmask in self.admin_list:
+                                    await self.send(f"Acknowledged {sender} quitting...")
+                                    await self.send(f"QUIT :Cl4irBot")
+                                    self.disconnect_requested = True
+                                    break
+                                elif command == '.reload' and hostmask in self.admin_list:
+                                    print("Reloading Config....")
+                                    config = self.reload_config()
+                                    if config:
+                                        print("Config Reloaded :)")
+                                else:
+                                    await self.user_commands(sender, channel, content, hostmask, self.last_messages, self.admin_list, admin_command=True)
+                                    break
+                        else:
+                            prefixes = [f's{sep}' for sep in self.separator_list] + [f'S{sep}' for sep in self.separator_list]
+                            if any(content.startswith(prefix) for prefix in prefixes) and len(content) > 2:
+                                await self.user_commands(sender, channel, content, hostmask, self.last_messages, self.admin_list)
+
+                        await self.detect_and_parse_urls(sender, channel, normalized_content, hostmask, self.last_messages, self.admin_list, admin_command=False)
                         await self.saw.record_last_seen(sender, channel, normalized_content)
                         await self.saw.save_last_seen()
                         await self.tatle_tell(sender, channel)
                         await self.handle_ctcp(tokens)
                         await self.save_message(sender, content, channel)
                         await self.save_last_messages()
-                        for command in self.available_commands:
-                            if content.startswith(command):
-                                await self.user_commands(sender, channel, content, hostmask, self.last_messages, self.admin_list)
-                                break  # Exit the loop after finding a match
-                        for command in self.admin_commands:
-                            if content.startswith(command):
-                                if command == '.quit'and hostmask in self.admin_list:
-                                    await self.send(f"Acknowledged {sender} quitting...")
-                                    await self.send(f"QUIT :Cl4irBot")
-                                    self.disconnect_requested = True
-                                    break
-                                else:
-                                    await self.user_commands(sender, channel, content, hostmask, self.last_messages, self.admin_list, admin_command=True)
-                                    break  # Exit the loop after finding a match
-                        else:
-                            # If no match is found, check if content starts with 's' or 'S'
-                            if content.startswith(('s', 'S')) and len(content) > 2:
-                                await self.user_commands(sender, channel, content, hostmask, self.last_messages, self.admin_list)
-                            elif url:
-                                await self.user_commands(sender, channel, content, hostmask, self.last_messages, self.admin_list)
+
         except Exception as e:
             print(e)
         except asyncio.CancelledError:
             print("handle_messages coroutine cancelled.")
+
+    def filter_private_ip(self, url):
+        # Extract the hostname from the URL
+        hostname = re.findall(r'https?://([^/:]+)', url)
+        if hostname:
+            hostname = hostname[0]
+            try:
+                ip = ipaddress.ip_address(hostname)
+                return ip.is_private  # Return True for private IP addresses
+            except ValueError:
+                pass  # Not an IP address
+
+        return False
+
+    async def detect_and_parse_urls(self, sender, channel, content, hostmask, last_messages, admin_list, admin_command=False):
+        urls = self.url_regex.findall(content)
+
+        for url in urls:
+            try:
+                if content.startswith("@"):
+                    return
+
+                if self.filter_private_ip(url):
+                    print(f"Ignoring URL with private IP address: {url}")
+                    continue
+
+                data = (sender, channel, url, hostmask, last_messages, admin_list)
+
+                self.response_track.clear()
+
+                async for response in self.send_command_to_parser(data):
+                    if response:
+                        print(f"detect_and_parse_urls: {response}")
+                        self.response_track.add(response)
+
+                if response is None:
+                    return
+
+                for response in self.response_track:
+                    await self.response_queue.put((channel, response))
+
+            except Exception as e:
+                print(e)
 
     async def user_commands(self, sender, channel, content, hostmask, last_messages, admin_list, admin_command=False):
         try:
@@ -357,7 +438,7 @@ class Clov3r:
             # Clear the response track at the start of the method
             self.response_track.clear()
 
-            async for response in self.send_command_to_parser(data):  # Await the coroutine here
+            async for response in self.send_command_to_parser(data):
                 if response:
                     print(f"user_commands: {response}")
                     self.response_track.add(response)
@@ -383,7 +464,7 @@ class Clov3r:
                     response = await asyncio.wait_for(reader.read(2048), timeout=5)
                     print(f"send_command_to_parser: {response}")
                     if not response:
-                        break  # Break the loop if no more responses
+                        break
                     if response in responses:
                         pass
                     
@@ -403,10 +484,10 @@ class Clov3r:
             print(f"Error in send_command_to_parser: {e}")
 
     async def tatle_tell(self, sender, channel):
-        response = await self.speak.send_saved_messages(sender, channel)
-        if response:
-            await self.response_queue.put((channel, response))
-            return
+        async for response in self.report.send_saved_messages(sender, channel):
+            if response:
+                print(f"Telling {sender}: {response}")
+                await self.response_queue.put((channel, response))
 
     async def keep_alive(self):
         while not self.disconnect_requested:
