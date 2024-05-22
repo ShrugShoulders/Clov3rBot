@@ -462,7 +462,6 @@ class Clov3r:
 
                 while True:
                     response = await asyncio.wait_for(reader.read(2048), timeout=5)
-                    print(f"send_command_to_parser: {response}")
                     if not response:
                         break
                     if response in responses:
