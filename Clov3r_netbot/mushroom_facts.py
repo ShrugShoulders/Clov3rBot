@@ -8,11 +8,6 @@ class MushroomFacts:
         self.mushroom_facts = []
         self.load_mushroom_facts()
 
-    def extract_factoid_criteria(self, args):
-        # Example: !fact parasol
-        # Extract the criteria from the user's command (e.g., "parasol")
-        return lambda fact: args.lower() in fact.lower()
-
     def load_mushroom_facts(self):
         try:
             with open("mushroom_facts.txt", "r") as file:
@@ -37,13 +32,19 @@ class MushroomFacts:
             response = "Please provide a valid mushroom fact."
             return response
 
-    async def send_random_mushroom_fact(self, channel, criteria=None):
+    async def send_random_mushroom_fact(self, args):
         if self.mushroom_facts:
-            filtered_facts = [fact for fact in self.mushroom_facts if criteria(fact)]
-            
+            criteria = args.strip().lower()
+            if criteria:
+                filtered_facts = [fact for fact in self.mushroom_facts if criteria in fact.lower()]
+            else:
+                filtered_facts = self.mushroom_facts
+
             if filtered_facts:
                 random_fact = random.choice(filtered_facts)
-                print(f"Sent mushroom fact to {channel}: {random_fact}")
                 return f"{random_fact}\r\n"
             else:
-                print("No matching mushroom facts found based on the criteria.")
+                print(f"No matching mushroom facts found for criteria: {criteria}")
+                return f"No matching mushroom facts found for: {criteria}\r\n"
+        else:
+            return "No mushroom facts available.\r\n"
