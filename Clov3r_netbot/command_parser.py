@@ -32,9 +32,9 @@ class CommandHandler:
         self.snag = WeatherSnag()
         self.load_commands()
 
-    def load_commands(self):
+    def load_commands(self): # We need to try and load this from a text file or something. 
         self.register_command('.ping', self.handle_ping, needs_context=True)
-        self.register_command('.help', help_command)
+        self.register_command('.help', help_command, full_context=True)
         self.register_command('.version', self.handle_version)
         self.register_command('.moo', self.handle_moo)
         self.register_command('.moof', self.handle_moof)
@@ -56,10 +56,11 @@ class CommandHandler:
         self.register_command('.op', self.handle_op, needs_context=True)
         self.register_command('.deop', self.handle_deop, needs_context=True)
 
-    def register_command(self, command, handler, needs_context=False):
+    def register_command(self, command, handler, needs_context=False, full_context=False):
         self.command_registry[command] = {
             "handler": handler,
-            "needs_context": needs_context
+            "needs_context": needs_context,
+            "full_context": full_context
         }
 
     def load_channels_features(self):
@@ -113,17 +114,17 @@ class CommandHandler:
                 handler_info = self.command_registry[command]
                 handler = handler_info["handler"]
                 needs_context = handler_info["needs_context"]
+                full_context = handler_info["full_context"]
 
                 if command in ['.part', '.join', '.op', '.deop'] and hostmask not in admin_list:
                     print(f"Unauthorized command attempt by {sender}.")
                 else:
-                    match command:
-                        case '.help':
-                            response = await handler(channel, sender, args, hostmask, admin_list) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args, hostmask, admin_list)
-                        case _ if needs_context:
-                            response = await handler(channel, sender, content) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args)
-                        case _:
-                            response = await handler(args) if asyncio.iscoroutinefunction(handler) else handler(args)
+                    if full_context:
+                        response = await handler(channel, sender, args, hostmask, admin_list) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args, hostmask, admin_list)
+                    elif needs_context:
+                        response = await handler(channel, sender, content) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args)
+                    else:
+                        response = await handler(args) if asyncio.iscoroutinefunction(handler) else handler(args)
 
                     if response is not None:
                         yield response
