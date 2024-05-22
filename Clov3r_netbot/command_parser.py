@@ -18,6 +18,7 @@ from weather import WeatherSnag
 
 class CommandHandler:
     def __init__(self):
+        self.command_registry = {}
         self.server_instance = None
         self.url_regex = re.compile(r'https?://[^\s\x00-\x1F\x7F]+')
         self.separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}','$', ',', "'", '"', '/', '\'', '\"']
@@ -29,6 +30,37 @@ class CommandHandler:
         self.seen = Seenme()
         self.mycelia = MushroomFacts()
         self.snag = WeatherSnag()
+        self.load_commands()
+
+    def load_commands(self):
+        self.register_command('.ping', self.handle_ping, needs_context=True)
+        self.register_command('.help', help_command)
+        self.register_command('.version', self.handle_version)
+        self.register_command('.moo', self.handle_moo)
+        self.register_command('.moof', self.handle_moof)
+        self.register_command('.seen', self.seen.seen_command, needs_context=True)
+        self.register_command('.stats', self.seen.stats_command, needs_context=True)
+        self.register_command('.tell', self.tatle.handle_tell_command, needs_context=True)
+        self.register_command('.fact', self.mycelia.send_random_mushroom_fact)
+        self.register_command('.factadd', self.mycelia.fact_add)
+        self.register_command('.weather', self.snag.get_weather)
+        self.register_command('.w', self.snag.get_weather)
+        self.register_command('.wx', self.snag.get_weather)
+        self.register_command('.bug', get_bug_details)
+        self.register_command('.yt', self.search.process_youtube_search)
+        self.register_command('.g', self.search.google_it)
+        self.register_command('.ddg', duck_search)
+        self.register_command('.tr', duck_translate)
+        self.register_command('.part', self.handle_part)
+        self.register_command('.join', self.handle_join)
+        self.register_command('.op', self.handle_op, needs_context=True)
+        self.register_command('.deop', self.handle_deop, needs_context=True)
+
+    def register_command(self, command, handler, needs_context=False):
+        self.command_registry[command] = {
+            "handler": handler,
+            "needs_context": needs_context
+        }
 
     def load_channels_features(self):
         try:
@@ -50,13 +82,14 @@ class CommandHandler:
 
     async def handle_command(self, data):
         sender, channel, content, hostmask, last_messages, admin_list = data
-        urls = self.url_regex.findall(content)  # `urls` is a list of all found URLs
+        urls = self.url_regex.findall(content)
 
         if not content.strip():
             print("Empty content received. Ignoring.")
             yield None
 
         response = None
+        command_handled = False
 
         # Create all possible prefixes with 's' and 'S'
         prefixes = [f's{sep}' for sep in self.separator_list] + [f'S{sep}' for sep in self.separator_list]
@@ -64,7 +97,6 @@ class CommandHandler:
         # Check if content starts with any of the commands
         command = content.split()[0].strip()
         args = content[len(command):].strip()
-        command_handled = False
 
         if any(content.startswith(prefix) for prefix in prefixes) and len(content) > 2:
             print("sed command")
@@ -75,64 +107,29 @@ class CommandHandler:
                     yield response
                     command_handled = True
 
-        if not command_handled:
-            if await self.handle_channel_features(channel, command):
-                print(f"Handling command '{command}' from {sender} in channel {channel}.")
-                match command:
-                    case '.ping':
-                        response = f"[\x0303Ping\x03] {sender}: PNOG!"
-                    case '.help':
-                        response = await help_command(channel, sender, args, hostmask, admin_list)
-                    case '.version':
-                        response = "Clov3rBot Version 4.0"
-                    case '.moo':
-                        response = "Hi cow!"
-                    case '.moof':
-                        dog_cow = "https://files.catbox.moe/8lk6xx.gif"
-                        question = "Hello Clarus, dog or cow?"
-                        sound = "http://tinyurl.com/mooooof"
-                        response = f"{question} {dog_cow} mooof {sound}\r\n"
-                    case '.seen':
-                        response = await self.seen.seen_command(channel, sender, content)
-                    case '.stats':
-                        response = await self.seen.stats_command(channel, sender, content)
-                    case '.tell':
-                        response = await self.tatle.handle_tell_command(channel, sender, content)
-                    case '.fact':
-                        criteria = self.mycelia.extract_factoid_criteria(args)
-                        response = await self.mycelia.send_random_mushroom_fact(channel, criteria)
-                    case '.factadd' if hostmask in admin_list:
-                        response = self.mycelia.fact_add(args)
-                    case '.weather' | '.w' | '.wx':
-                        response = await self.snag.get_weather(args)
-                    case '.bug':
-                        response = get_bug_details(args)
-                    case '.yt':
-                        response = self.search.process_youtube_search(args)
-                    case '.g':
-                        response = self.search.google_it(args)
-                    case '.ddg':
-                        response = duck_search(args, channel)
-                    case '.tr':
-                        response = duck_translate(args)
-                    case '.part' if hostmask in admin_list:
-                        if args:
-                            part_channel = args.split()[0]
-                            response = f"PART {part_channel}\r\n"
-                    case '.join' if hostmask in admin_list:
-                        if args:
-                            new_channel = args.split()[0]
-                            response = f"JOIN {new_channel}\r\n"
-                    case '.op' if hostmask in admin_list:
-                        response = f"MODE {channel} +o {sender}\r\n"
-                    case '.deop' if hostmask in admin_list:
-                        response = f"MODE {channel} -o {sender}\r\n"
+        if not command_handled and await self.handle_channel_features(channel, command):
+            print(f"Handling command '{command}' from {sender} in channel {channel}.")
+            if command in self.command_registry:
+                handler_info = self.command_registry[command]
+                handler = handler_info["handler"]
+                needs_context = handler_info["needs_context"]
 
-                if response is not None:
-                    yield response
-                    command_handled = True
+                if command in ['.part', '.join', '.op', '.deop'] and hostmask not in admin_list:
+                    print(f"Unauthorized command attempt by {sender}.")
+                else:
+                    match command:
+                        case '.help':
+                            response = await handler(channel, sender, args, hostmask, admin_list) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args, hostmask, admin_list)
+                        case _ if needs_context:
+                            response = await handler(channel, sender, content) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args)
+                        case _:
+                            response = await handler(args) if asyncio.iscoroutinefunction(handler) else handler(args)
 
-        # Now handle any URLs found in the content
+                    if response is not None:
+                        yield response
+                        command_handled = True
+
+        # Handle URLs if any and not a command
         if urls and not content.startswith('.'):
             if await self.handle_channel_features(channel, '.urlparse'):
                 titlescrape = Titlescraper()
@@ -146,6 +143,37 @@ class CommandHandler:
             elif await self.handle_channel_features(channel, '.redditparse'):
                 response = await parse_reddit_url(content)
                 yield response
+
+    async def handle_ping(self, channel, sender, args):
+        return f"[\x0303Ping\x03] {sender}: PNOG!"
+
+    async def handle_version(self, args):
+        return "Clov3rBot Version 4.0"
+
+    async def handle_moo(self, args):
+        return "Hi cow!"
+
+    async def handle_moof(self, args):
+        dog_cow = "https://files.catbox.moe/8lk6xx.gif"
+        question = "Hello Clarus, dog or cow?"
+        sound = "http://tinyurl.com/mooooof"
+        return f"{question} {dog_cow} mooof {sound}\r\n"
+
+    async def handle_part(self, args):
+        if args:
+            part_channel = args.split()[0]
+            return f"PART {part_channel}\r\n"
+
+    async def handle_join(self, args):
+        if args:
+            new_channel = args.split()[0]
+            return f"JOIN {new_channel}\r\n"
+
+    async def handle_op(self, channel, sender, args):
+        return f"MODE {channel} +o {sender}\r\n"
+
+    async def handle_deop(self, channel, sender, args):
+        return f"MODE {channel} -o {sender}\r\n"
 
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
