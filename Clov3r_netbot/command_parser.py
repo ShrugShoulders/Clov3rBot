@@ -3,6 +3,8 @@ import json
 import datetime
 import re
 import ipaddress
+import importlib
+import sys
 from sed import handle_sed_command
 from google_api import Googlesearch
 from title_scrape import Titlescraper
@@ -55,6 +57,7 @@ class CommandHandler:
         self.register_command('.join', self.handle_join)
         self.register_command('.op', self.handle_op, needs_context=True)
         self.register_command('.deop', self.handle_deop, needs_context=True)
+        self.register_command('.remod', self.reload_modules)
 
     def register_command(self, command, handler, needs_context=False, full_context=False):
         self.command_registry[command] = {
@@ -62,6 +65,27 @@ class CommandHandler:
             "needs_context": needs_context,
             "full_context": full_context
         }
+
+    def reload_modules(self, args):
+        print("Reloading Modules...")
+        module_names = [
+            'sed', 'google_api', 'title_scrape', 'duckduckgo', 'reddit_urls',
+            'tell_command', 'last_seen', 'gentoo_bugs', 'mushroom_facts',
+            'help', 'weather'
+        ]
+
+        for module_name in module_names:
+            if module_name in sys.modules:
+                importlib.reload(sys.modules[module_name])
+
+        # Re-initialize objects
+        self.search = Googlesearch()
+        self.tatle = Tell()
+        self.seen = Seenme()
+        self.mycelia = MushroomFacts()
+        self.snag = WeatherSnag()
+        self.load_commands()
+        print("Done? Please test.")
 
     def load_channels_features(self):
         try:
