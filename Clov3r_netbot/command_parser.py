@@ -76,16 +76,21 @@ class CommandHandler:
 
         for module_name in module_names:
             if module_name in sys.modules:
-                importlib.reload(sys.modules[module_name])
+                sys.modules[module_name] = importlib.reload(sys.modules[module_name])
+                print(f"Reloaded module: {module_name}")
 
-        # Re-initialize objects
-        self.search = Googlesearch()
-        self.tatle = Tell()
-        self.seen = Seenme()
-        self.mycelia = MushroomFacts()
-        self.snag = WeatherSnag()
+        self.command_registry.clear()
+
+        # Re-initialize objects with the reloaded module references
+        self.search = sys.modules["google_api"].Googlesearch()
+        self.tatle = sys.modules["tell_command"].Tell()
+        self.seen = sys.modules["last_seen"].Seenme()
+        self.mycelia = sys.modules["mushroom_facts"].MushroomFacts()
+        self.snag = sys.modules["weather"].WeatherSnag()
+
+        # Reload commands to use the updated handlers
         self.load_commands()
-        print("Done? Please test.")
+        print("Modules Reloaded. :)")
 
     def load_channels_features(self):
         try:
@@ -140,7 +145,7 @@ class CommandHandler:
                 needs_context = handler_info["needs_context"]
                 full_context = handler_info["full_context"]
 
-                if command in ['.part', '.join', '.op', '.deop'] and hostmask not in admin_list:
+                if command in ['.part', '.join', '.op', '.deop', '.remod'] and hostmask not in admin_list:
                     print(f"Unauthorized command attempt by {sender}.")
                 else:
                     if full_context:
@@ -259,7 +264,10 @@ class CommandHandler:
         print("Server started and listening for connections...")
         self.server_instance = await asyncio.start_server(self.handle_client, '127.0.0.1', 8888)
         async with self.server_instance:
-            await self.server_instance.serve_forever()
+            try:
+                await self.server_instance.serve_forever()
+            except asyncio.CancelledError:
+                print("Server cancelled.")
 
 if __name__ == '__main__':
     command_handler = CommandHandler()
