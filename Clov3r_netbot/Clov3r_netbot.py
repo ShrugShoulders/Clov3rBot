@@ -10,7 +10,6 @@ import html
 import irctokens
 import re
 import ipaddress
-from tell_command import Tell
 from last_seen import Seenme
 from report_command import ReportIn
 
@@ -31,13 +30,13 @@ class Clov3r:
         self.response_queue = asyncio.Queue()
         self.lock = asyncio.Lock()
         self.last_messages = {}
+        self.ignore_list = []
         self.admin_list = admin_list
         self.url_regex = re.compile(r'https?://[^\s\x00-\x1F\x7F]+')
         self.available_commands = available_commands
         self.admin_commands = admin_commands
         self.separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}','$', ',', "'", '"', '/', '\'', '\"']
         self.response_track = set()
-        self.speak = Tell()
         self.saw = Seenme()
         self.report = ReportIn()
 
@@ -339,6 +338,10 @@ class Clov3r:
                         parts = content.split()
                         normalized_content = ' '.join(parts)
 
+                        if sender in self.ignore_list:
+                            print(f"Ignored message from {sender}")
+                            continue
+
                         print(f"Sender: {sender}")
                         print(f"Channel: {channel}")
                         print(f"Content: {content}")
@@ -501,6 +504,17 @@ class Clov3r:
                 self.response_track.clear()
             await asyncio.sleep(30)
 
+    def load_ignore_list(self):
+        file_path = 'ignore_list.txt'
+        try:
+            with open(file_path, 'r') as file:
+                self.ignore_list = [line.strip() for line in file.readlines() if line.strip()]
+                print("Ignore List Loaded Successfully")
+        except FileNotFoundError:
+            print(f"Warning: Ignore list file '{file_path}' not found. Continuing with an empty ignore list.")
+        except Exception as e:
+            print(f"Error loading ignore list from '{file_path}': {e}")
+
     async def disconnect(self):
         if self.writer:
             self.writer.close()
@@ -514,6 +528,7 @@ class Clov3r:
                 try:
                     await self.connect()
                     await self.load_last_messages()
+                    self.load_ignore_list()
 
                     keep_alive_task = asyncio.create_task(self.keep_alive())
                     handle_messages_task = asyncio.create_task(self.handle_messages())
