@@ -56,12 +56,6 @@ async def handle_sed_command(channel, sender, content, last_messages):
                 if re.match(fr'^[sS][{separators}].*[{separators}].*[{separators}]?[gi]*\d*$', original_message):
                     continue
 
-                if old in ["*", "$", "^"]:
-                    if original_message.startswith("*"):
-                        return f"[\x0303Sed\x03] {original_message}\r\n"
-                    else:
-                        return f"[\x0303Sed\x03] <{original_sender}> {original_message}\r\n"
-
                 print(f"Checking message - Original: <{original_sender}> {original_message}")
 
                 if re.search(regex_pattern, original_message, flags=regex_flags):
