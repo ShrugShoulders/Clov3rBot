@@ -2,11 +2,17 @@ import datetime
 import asyncio
 import aiofiles
 import json
+import re
 
 class Tell:
     def __init__(self):
         self.message_queue = {}
         self.load_message_queue()
+
+    def strip_irc_formatting(self, text):
+        # Regular expression to match IRC color and formatting codes
+        irc_formatting_pattern = re.compile(r'(\x03\d{0,2}(,\d{1,2})?)|(\x02)|(\x1F)|(\x16)|(\x0F)')
+        return irc_formatting_pattern.sub('', text)
 
     async def handle_tell_command(self, channel, sender, content):
         self.message_queue = {}
@@ -14,6 +20,10 @@ class Tell:
         try:
             # Parse the command: !tell username message
             _, username, message = content.split(' ', 2)
+
+            # Strip IRC colors and formatting from the message
+            username = self.strip_irc_formatting(username)
+            message = self.strip_irc_formatting(message)
 
             # Convert the recipient's nickname to lowercase
             username_lower = username.lower()
