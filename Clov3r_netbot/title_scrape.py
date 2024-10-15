@@ -16,18 +16,20 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from html import escape, unescape
 from requests.exceptions import HTTPError, Timeout, RequestException
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, urlunparse, parse_qs
 from bs4 import BeautifulSoup
 from PIL import Image
 from gentoo_bugs import get_bug_details
 from reddit_urls import parse_reddit_url
+from link_tracker import TitleTracker
 
 
 class Titlescraper:
     def __init__(self):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0', 'Accept-Encoding': 'identity'}
-        self.api_key = ""
+        self.api_key = "AIzaSyBYmiMXJunZXnSovbRIoYszlgf9V_YQCu8"
         self.youtube_service = build('youtube', 'v3', developerKey=self.api_key)
+        self.tracker = TitleTracker()
 
     async def sanitize_input(self, malicious_input):
         decoded_input = html.unescape(malicious_input)
@@ -41,19 +43,6 @@ class Titlescraper:
         )
         return safe_output
 
-    def filter_private_ip(self, url):
-        # Extract the hostname from the URL
-        hostname = re.findall(r'https?://([^/:]+)', url)
-        if hostname:
-            hostname = hostname[0]
-            try:
-                ip = ipaddress.ip_address(hostname)
-                return ip.is_private  # Return True for private IP addresses
-            except ValueError:
-                pass  # Not an IP address
-
-        return False
-
     async def extract_webpage_title(self, url, redirect_limit=25):
         REQUEST_TIMEOUT = 10
         ignore_ssl_errors = False  # Flag to indicate whether to ignore SSL errors
@@ -62,6 +51,8 @@ class Titlescraper:
         for attempt in range(2):  # Attempt connection with possible retry for SSL error
             try:
                 parsed_url = urlparse(url)  # Re-parse URL on retry
+                full_path = urlunparse(parsed_url)  # Construct full URL including query parameters
+
                 if parsed_url.scheme == 'http':
                     connection = http.client.HTTPConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT)
                 else:
@@ -72,7 +63,7 @@ class Titlescraper:
                     else:
                         connection = http.client.HTTPSConnection(parsed_url.netloc, timeout=REQUEST_TIMEOUT)
                 
-                connection.request("GET", parsed_url.path or '/', headers=headers)  # Include the headers in the request
+                connection.request("GET", full_path or '/', headers=headers)  # Include the headers in the request
                 response = connection.getresponse()
 
                 # Follow redirects if status code is 301 or 302, up to a limit
@@ -83,9 +74,10 @@ class Titlescraper:
                     if not new_location:
                         return "Error: No location for redirect"
                     parsed_url = urlparse(new_location)
+                    full_path = urlunparse(parsed_url)  # Reconstruct full URL for the new location
                     connection = http.client.HTTPConnection(parsed_url.netloc) if parsed_url.scheme == 'http' else http.client.HTTPSConnection(parsed_url.netloc)
                     # Include the headers again for the new request after redirect
-                    connection.request("GET", parsed_url.path or '/', headers=headers)
+                    connection.request("GET", full_path or '/', headers=headers)
                     response = connection.getresponse()
 
                 if response.status in [400, 404, 401, 405, 403]:
@@ -202,17 +194,30 @@ class Titlescraper:
 
         return f"{size_in_bytes:.2f} TB"
 
-    async def process_url(self, url):
+    async def process_url(self, url, channel):
         parsed_url = urlparse(url)
         hostname = parsed_url.hostname
 
-        if hostname in ['www.amazon.com', 'www.amazon.co.uk']:
+        self.tracker.add_channel(channel)
+
+        self.tracker.reset_url_list(channel)
+
+        if url in self.tracker.handled_links[channel]:
+            return
+
+        self.tracker.add_link(url, channel)
+
+        if hostname == 'github.com':
+            # Remove the fragment (#L42 part) from the URL
+            url = urlunparse(parsed_url._replace(fragment=""))
+            return await self.sanitize_input(await self.extract_webpage_title(url))
+        elif hostname in ['www.amazon.com', 'www.amazon.co.uk']:
             return self.process_amazon_url(url)
         elif hostname == 'crates.io':
             return self.process_crates_url(url)
-        elif hostname == 'twitter.com':
-            return f"[\x0303Website\x03] X (formerly Twitter)"
-        elif hostname in ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com']:
+        elif hostname in ['twitter.com', 'x.com']:
+            return f"[\x0303Website\x03] X - (formerly Twitter)"
+        elif hostname in ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com', 'music.youtube.com']:
             return await self.process_youtube_video(url)
         elif hostname in ['reddit.com', 'www.reddit.com']:
             return await parse_reddit_url(url)
@@ -222,10 +227,31 @@ class Titlescraper:
         elif hostname == 'bugs.gentoo.org':
             return await self.handle_gentoo_bugs(url)
         else:
-            return await self.sanitize_input(await self.extract_webpage_title(url)) # https://bugs.gentoo.org/902829
+            return await self.sanitize_input(await self.extract_webpage_title(url))
+
+    def save_to_json(self):
+        with open('handled_links.json', 'w') as f:
+            json.dump(self.handled_links, f, indent=4)
+
+    def load_from_json(self):
+        try:
+            with open('handled_links.json', 'r') as f:
+                self.handled_links = json.load(f)
+        except FileNotFoundError:
+            # File doesn't exist, initialize as empty
+            self.handled_links = {}
 
     async def handle_gentoo_bugs(self, url):
-        bug_number = url.split('/')[-1]
+        # Split the URL
+        last_part = url.split('/')[-1]
+
+        # Check if the last part contains 'id='
+        if 'id=' in url:
+            bug_number = last_part.split('=')[-1]
+        else:
+            bug_number = last_part
+
+        # Pass the extracted bug number/string to get_bug_details
         response = get_bug_details(bug_number)
         return response
 
@@ -242,12 +268,13 @@ class Titlescraper:
         parsed_url = urlparse(url)
         video_id = None
         
-        if parsed_url.netloc in ['www.youtube.com', 'youtu.be', 'm.youtube.com']:
-            if parsed_url.path.startswith('/watch'):
-                query_params = parse_qs(parsed_url.query)
-                video_id = query_params.get('v', [None])[0]
-            elif parsed_url.path.startswith('/shorts'):
-                video_id = parsed_url.path.split('/')[2]
+        if parsed_url.netloc in ['www.youtube.com', 'youtube.com', 'm.youtube.com', 'youtu.be', 'music.youtube.com']:
+            if parsed_url.netloc in ['www.youtube.com', 'youtube.com', 'm.youtube.com', 'music.youtube.com']:
+                if parsed_url.path.startswith('/watch'):
+                    query_params = parse_qs(parsed_url.query)
+                    video_id = query_params.get('v', [None])[0]
+                elif parsed_url.path.startswith('/shorts'):
+                    video_id = parsed_url.path.split('/')[2]
             elif parsed_url.netloc == 'youtu.be':
                 video_id = parsed_url.path.lstrip('/')
         
@@ -280,8 +307,6 @@ class Titlescraper:
         response = request.execute()
         
         if 'items' in response and len(response['items']) > 0:
-            print(f"{response['items'][0]}")
-            
             # Save the new or updated video data to the cache file
             with open(cache_file_path, 'w', encoding='utf-8') as f:
                 json.dump(response['items'][0], f, ensure_ascii=False, indent=2)
@@ -321,7 +346,7 @@ class Titlescraper:
             formatted_parts.append(f"\x02{uploader}\x0F")
         
         formatted_data = " | ".join(formatted_parts)
-        return f"[\x0301,00\x02You\x0300,04\x02Tube\x03]\x0F {formatted_data}"
+        return f"\x030,4 ► \x031,0\x02YouTube\x0F {formatted_data}" # ^ \x030,4 ► \x031,0\x02YouTube\x0F or \x0301,00\x02You\x0300,04\x02Tube\x03\x0F
 
     def process_amazon_url(self, url):
         product_name = " ".join(url.split('/')[3].split('-')).title()
@@ -463,7 +488,7 @@ class Titlescraper:
             os.makedirs(images_directory)
 
         try:
-            image_response = requests.get(clean_url, headers=self.headers)
+            image_response = requests.get(url, headers=self.headers)
             image_size_bytes = len(image_response.content)
             formatted_image_size = self.format_file_size(image_size_bytes)
 
@@ -479,6 +504,8 @@ class Titlescraper:
 
         except Exception as e:
             print(f"Error fetching and saving image: {e}")
+            print(f"URL: {url}")
+            print(f"Response Content-Type: {image_response.headers.get('Content-Type', 'unknown')}")
             formatted_image_size = "unknown size"
             image_dimensions = "N/A"
         
