@@ -5,6 +5,8 @@ import re
 import ipaddress
 import importlib
 import sys
+import random
+import types
 from sed import handle_sed_command
 from google_api import Googlesearch
 from title_scrape import Titlescraper
@@ -16,6 +18,7 @@ from gentoo_bugs import get_bug_details
 from mushroom_facts import MushroomFacts
 from help import help_command
 from weather import WeatherSnag
+from botpad import BotPad
 
 
 class CommandHandler:
@@ -25,14 +28,20 @@ class CommandHandler:
         self.url_regex = re.compile(r'https?://[^\s\x00-\x1F\x7F]+')
         self.separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}','$', ',', "'", '"', '/', '\'', '\"']
         self.channels_features = {}
-        self.processed_urls = {}
         self.search = Googlesearch()
         self.load_channels_features()
         self.tatle = Tell()
         self.seen = Seenme()
         self.mycelia = MushroomFacts()
         self.snag = WeatherSnag()
+        self.scribe = BotPad()
         self.load_commands()
+        self.snack_count = 0
+        self.snack_level = 0
+        self.snacks = []
+        self.load_snack_data()
+        self.load_snack_list()
+        self.scraper = Titlescraper()
 
     def load_commands(self): # We need to try and load this from a text file or something. 
         self.register_command('.ping', self.handle_ping, needs_context=True)
@@ -58,6 +67,13 @@ class CommandHandler:
         self.register_command('.op', self.handle_op, needs_context=True)
         self.register_command('.deop', self.handle_deop, needs_context=True)
         self.register_command('.remod', self.reload_modules)
+        self.register_command('.reload', self.reload_data)
+        self.register_command('.botsnack', self.bot_snack, needs_context=True)
+        self.register_command('.addsnack', self.add_snack)
+        self.register_command('.memo', self.scribe.add_note, needs_context=True)
+        self.register_command('.remind', self.scribe.get_notes, needs_context=True)
+        self.register_command('.rmnote', self.scribe.clear_user_notes, needs_context=True)
+        self.register_command('.topstats', self.seen.top_stats_command, needs_context=True)
 
     def register_command(self, command, handler, needs_context=False, full_context=False):
         self.command_registry[command] = {
@@ -91,6 +107,12 @@ class CommandHandler:
         # Reload commands to use the updated handlers
         self.load_commands()
         print("Modules Reloaded. :)")
+
+    def reload_data(self, args):
+        print("Reloading Data")
+        self.channels_features = {}
+        self.load_channels_features()
+        print("Reloaded Data :)")
 
     def load_channels_features(self):
         try:
@@ -145,15 +167,20 @@ class CommandHandler:
                 needs_context = handler_info["needs_context"]
                 full_context = handler_info["full_context"]
 
-                if command in ['.part', '.join', '.op', '.deop', '.remod'] and hostmask not in admin_list:
+                if command in ['.part', '.join', '.op', '.deop', '.remod', '.addsnack'] and hostmask not in admin_list:
                     print(f"Unauthorized command attempt by {sender}.")
                 else:
-                    if full_context:
-                        response = await handler(channel, sender, args, hostmask, admin_list) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args, hostmask, admin_list)
-                    elif needs_context:
-                        response = await handler(channel, sender, content) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args)
-                    else:
-                        response = await handler(args) if asyncio.iscoroutinefunction(handler) else handler(args)
+                    try:
+                        if full_context:
+                            response = await handler(channel, sender, args, hostmask, admin_list) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args, hostmask, admin_list)
+                        elif needs_context:
+                            response = await handler(channel, sender, content) if asyncio.iscoroutinefunction(handler) else handler(channel, sender, args)
+                        else:
+                            response = await handler(args) if asyncio.iscoroutinefunction(handler) else handler(args)
+                    except ValueError as e:
+                        print(e)
+                    except Exception as e:
+                        print(e)
 
                     if response is not None:
                         yield response
@@ -162,10 +189,9 @@ class CommandHandler:
         # Handle URLs if any and not a command
         if urls and not content.startswith('.'):
             if await self.handle_channel_features(channel, '.urlparse'):
-                titlescrape = Titlescraper()
                 for url in urls:
                     try:
-                        url_response = await titlescrape.process_url(url)
+                        url_response = await self.scraper.process_url(url, channel)
                         await asyncio.sleep(1)
                         yield url_response
                     except Exception as e:
@@ -174,8 +200,54 @@ class CommandHandler:
                 response = await parse_reddit_url(content)
                 yield response
 
+    def save_snack_data(self):
+        data = {
+            'snack_count': self.snack_count,
+            'snack_level': self.snack_level
+        }
+        with open('snack_data.json', 'w') as file:
+            json.dump(data, file)
+
+    def load_snack_data(self):
+        try:
+            with open('snack_data.json', 'r') as file:
+                data = json.load(file)
+                self.snack_count = data['snack_count']
+                self.snack_level = data['snack_level']
+        except FileNotFoundError:
+            self.snack_count = 0
+            self.snack_level = 0
+
+    def load_snack_list(self):
+        try:
+            with open('snacks.txt', 'r') as file:
+                self.snacks = [line.strip() for line in file.readlines()]
+        except FileNotFoundError:
+            self.snacks = []
+
+    def add_snack(self, snack):
+        self.snacks.append(snack)
+        self.save_snack_list()
+        return "Snack Purchased"
+
+    def save_snack_list(self):
+        with open('snacks.txt', 'w') as file:
+            for snack in self.snacks:
+                file.write(snack + '\n')
+
+    async def bot_snack(self, channel, sender, content):
+        self.snack_count += 1
+        self.save_snack_data()
+        if self.snack_count == 100:
+            self.snack_level += 1
+            self.snack_count = 0
+            self.save_snack_data()
+        message = f"\x01ACTION munches on some {random.choice(self.snacks)} ({self.snack_count} lvl{self.snack_level})\x01"
+        return f"{message}"
+
     async def handle_ping(self, channel, sender, args):
-        return f"[\x0303Ping\x03] {sender}: PNOG!"
+        ping_responses = ['PNOG!', 'PONG', 'what?', 'pong', 'doorbell']
+        return f"[\x0303Ping\x03] {sender}: {random.choice(ping_responses)}"
 
     async def handle_version(self, args):
         return "Clov3rBot Version 4.0"
@@ -231,19 +303,20 @@ class CommandHandler:
                     try:
                         data, index = json.JSONDecoder().raw_decode(buffer)
                         buffer = buffer[index:].lstrip()  # Remove processed part from buffer
-                        print("Received data:", data)
                         
                         # Process all responses
-                        responses = []
                         async for response in self.handle_command(data):
-                            if response:
-                                responses.append(response)
-
-                        # Send all responses
-                        for response in responses:
-                            print("Sending response:", response)
-                            writer.write(response.encode())
-                            await writer.drain()
+                            if isinstance(response, str):
+                                # If it's a regular string response, send it directly
+                                print("Sending response:", response)
+                                writer.write(response.encode())
+                                await writer.drain()
+                            elif isinstance(response, types.GeneratorType):
+                                # If it's a generator (e.g. from get_notes), iterate through it
+                                for note in response:
+                                    print("Sending Generator response:", note)
+                                    writer.write(note.encode())
+                                    await writer.drain()
                         
                         # Close the connection after all responses are sent
                         writer.close()
