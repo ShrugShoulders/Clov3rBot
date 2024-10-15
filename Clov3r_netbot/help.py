@@ -18,8 +18,7 @@ async def help_command(channel, sender, args=None, hostmask=None, admin_list=Non
             return response
 
         else:
-            response = f"{sender}, Unknown command: {specific_command}\r\n"
-            return response
+            return
     else:
         # Provide an overview of available commands
         response = f"{sender}, Commands: {', '.join(available_commands)} Use: .help <command> for more info.\r\n"
@@ -46,6 +45,9 @@ def get_available_commands(exclude_admin=True):
         ".ddg",
         ".tr",
         ".yt",
+        ".memo",
+        ".remind",
+        ".rmnote",
         ".admin",
     ]
     if exclude_admin:
@@ -71,7 +73,11 @@ def get_detailed_help(command):
         ".ddg": "Searches DuckDuckGo for a given term",
         ".tr": "Translates a string, Example: .tr hello -ga will translate to Irish. Default translate is english",
         ".yt": "Searches YouTube for a video: .yt <search terms>",
-        ".admin": ".factadd - .quit - .join - .part - .op - .deop",
+        ".memo": "Adds a memo that the bot will remind you of, .memo <number> <note> will choose the hours of which the bot will wait to remind you.",
+        ".remind": "Shows all memos saved with index",
+        ".rmnote": ".rmnote <index> Removes memo at the given index",
+        ".admin": ".factadd - .quit - .join - .part - .op - .deop - .remod - .reload",
     }
 
-    return help_dict.get(command, f"No detailed help available for {command}.")
+    if command in help_dict:
+        return help_dict[command]
