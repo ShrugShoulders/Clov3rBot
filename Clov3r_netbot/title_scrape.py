@@ -27,7 +27,7 @@ from link_tracker import TitleTracker
 class Titlescraper:
     def __init__(self):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0', 'Accept-Encoding': 'identity'}
-        self.api_key = "AIzaSyBYmiMXJunZXnSovbRIoYszlgf9V_YQCu8"
+        self.api_key = ""
         self.youtube_service = build('youtube', 'v3', developerKey=self.api_key)
         self.tracker = TitleTracker()
 
