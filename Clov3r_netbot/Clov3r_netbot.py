@@ -9,13 +9,16 @@ import time
 import html
 import irctokens
 import re
+import os
 import ipaddress
+import ctypes
 from last_seen import Seenme
 from report_command import ReportIn
+from botpad import BotPad
 
 
 class Clov3r:
-    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, sasl_username=None, available_commands=None, admin_commands=None, config_file=None):
+    def __init__(self, nickname, channels, server, port=6697, use_ssl=True, admin_list=None, nickserv_password=None, sasl_username=None, available_commands=None, admin_commands=None, notice_commands=None, config_file=None):
         self.config_file = config_file
         self.nickname = nickname
         self.sasl_username = sasl_username
@@ -27,6 +30,8 @@ class Clov3r:
         self.reader = None
         self.writer = None
         self.disconnect_requested = False
+        self.is_notice = False
+        self.requester = ''
         self.response_queue = asyncio.Queue()
         self.lock = asyncio.Lock()
         self.last_messages = {}
@@ -35,10 +40,12 @@ class Clov3r:
         self.url_regex = re.compile(r'https?://[^\s\x00-\x1F\x7F]+')
         self.available_commands = available_commands
         self.admin_commands = admin_commands
+        self.notice_commands = notice_commands
         self.separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}','$', ',', "'", '"', '/', '\'', '\"']
         self.response_track = set()
         self.saw = Seenme()
         self.report = ReportIn()
+        self.deltacheck = BotPad()
 
     @classmethod
     def from_config_file(cls, config_file):
@@ -50,6 +57,7 @@ class Clov3r:
         nickserv_password = bot_config.get('nickserv_password', fallback=None)
         available_commands = bot_config.get('available_commands').split(',')
         admin_commands = bot_config.get('admin_commands').split(',')
+        notice_commands = bot_config.get('notice_commands').split(',')
 
         return cls(
             nickname=bot_config.get('nickname'),
@@ -62,6 +70,7 @@ class Clov3r:
             sasl_username=bot_config.get('sasl_username'),
             available_commands=available_commands,
             admin_commands=admin_commands,
+            notice_commands=notice_commands,
             config_file=config_file
         )
 
@@ -77,6 +86,7 @@ class Clov3r:
         nickserv_password = bot_config.get('nickserv_password', fallback=None)
         available_commands = bot_config.get('available_commands').split(',')
         admin_commands = bot_config.get('admin_commands').split(',')
+        notice_commands = bot_config.get('notice_commands').split(',')
 
         self.nickname = bot_config.get('nickname')
         self.channels = channels
@@ -88,6 +98,7 @@ class Clov3r:
         self.sasl_username = bot_config.get('sasl_username')
         self.available_commands = available_commands
         self.admin_commands = admin_commands
+        self.notice_commands = notice_commands
         return True
 
     async def connect(self):
@@ -105,9 +116,11 @@ class Clov3r:
                 await self.send(f'NICK {self.nickname}')
                 await self.identify_with_sasl()
                 break
-            except (ConnectionError, OSError) as e:
+            except NameInUseError as e:
                 print(e)
-                await asyncio.sleep(5)  # Wait before retrying to connect
+                await asyncio.sleep(270)
+            except (ConnectionError, OSError) as e:
+                print(f"Error in connect: {e}")
 
     async def identify_with_sasl(self):
         buffer = ""
@@ -125,7 +138,6 @@ class Clov3r:
             while '\r\n' in buffer:
                 line, buffer = buffer.split('\r\n', 1)
                 tokens = irctokens.tokenise(line)
-                print(line)
 
                 match tokens.command:
                     case "CAP":
@@ -173,10 +185,11 @@ class Clov3r:
         await asyncio.sleep(0.3)
 
     async def handle_cap(self, tokens):
-        print("Handling CAP")
         if "LS" in tokens.params:
+            print("Handling CAP LS: CAP REQ :sasl")
             await self.send("CAP REQ :sasl")
         elif "ACK" in tokens.params:
+            print("ACK Received")
             await self.send("AUTHENTICATE PLAIN")
 
     async def handle_sasl_auth(self, tokens):
@@ -207,11 +220,18 @@ class Clov3r:
             try:
                 # Check if the response has already been sent
                 if response not in sent_responses:
-                    await self.send(f'PRIVMSG {channel} :{response}')
-                    print(f"Sent: {response} to {channel}")
-                    await asyncio.sleep(0.4)
-                    # Add the response to the list of sent responses
-                    sent_responses.append(response)
+                    if self.is_notice:
+                        await self.send(f'NOTICE {self.requester} :{response}')
+                        print(f"Sent: {response} to {self.requester}")
+                        await asyncio.sleep(0.4)
+                        # Add the response to the list of sent responses
+                        sent_responses.append(response)
+                    else:
+                        await self.send(f'PRIVMSG {channel} :{response}')
+                        print(f"Sent: {response} to {channel}")
+                        await asyncio.sleep(0.4)
+                        # Add the response to the list of sent responses
+                        sent_responses.append(response)
             finally:
                 self.response_queue.task_done()
 
@@ -219,6 +239,7 @@ class Clov3r:
             if self.response_queue.empty():
                 # Reset the list of sent responses
                 sent_responses = []
+                self.is_notice = False
 
     async def handle_ctcp(self, tokens):
         hostmask = tokens.hostmask
@@ -290,7 +311,6 @@ class Clov3r:
             try:
                 with open(filename, 'w') as file:
                     json.dump(serializable_last_messages, file, indent=2)
-                print(f"Saved last messages to {filename}")
             except Exception as e:
                 print(f"Error saving last messages: {e}")
 
@@ -326,7 +346,6 @@ class Clov3r:
                         continue
 
                     tokens = irctokens.tokenise(line)
-                    print(line)
 
                     if tokens.command == "PING":
                         await self.send(f"PONG {tokens.params[0].strip().lstrip()}")
@@ -359,11 +378,13 @@ class Clov3r:
                                     await self.send(f"QUIT :Cl4irBot")
                                     self.disconnect_requested = True
                                     break
-                                elif command == '.reload' and hostmask in self.admin_list:
+                                elif command == '.reconf' and hostmask in self.admin_list:
                                     print("Reloading Config....")
                                     config = self.reload_config()
                                     if config:
                                         print("Config Reloaded :)")
+                                        self.load_ignore_list()
+                                        break
                                 else:
                                     await self.user_commands(sender, channel, content, hostmask, self.last_messages, self.admin_list, admin_command=True)
                                     break
@@ -379,9 +400,14 @@ class Clov3r:
                         await self.handle_ctcp(tokens)
                         await self.save_message(sender, content, channel)
                         await self.save_last_messages()
+                        await self.notes_check(sender, channel)
 
+        except (ConnectionError, OSError) as e:
+            print(f"OSError/ConnectionError in handle_messages: {e}")
+            await asyncio.sleep(246)
+            await self.connect()
         except Exception as e:
-            print(e)
+            print(f"Error in handle_messages: {e}")
         except asyncio.CancelledError:
             print("handle_messages coroutine cancelled.")
 
@@ -419,16 +445,30 @@ class Clov3r:
                         print(f"detect_and_parse_urls: {response}")
                         self.response_track.add(response)
 
-                if response is None:
+                if not response:
                     return
 
                 for response in self.response_track:
                     await self.response_queue.put((channel, response))
 
             except Exception as e:
-                print(e)
+                print(f"Error in detect_and_parse_urls: {e}")
+
+    async def send_to_parser_slowly(self, data, delay=1):
+        """Coroutine to send data to parser with a delay."""
+        await asyncio.sleep(delay)
+        async for response in self.send_command_to_parser(data):
+            if response:
+                print(f"user_commands: {response}")
+                self.response_track.add(response)
 
     async def user_commands(self, sender, channel, content, hostmask, last_messages, admin_list, admin_command=False):
+        self.requester = sender
+        args = content.split()
+        if args[0] in self.notice_commands:
+            self.is_notice = True
+        elif args[0] in self.available_commands:
+            self.is_notice = False
         try:
             if not content.strip():
                 return
@@ -441,18 +481,17 @@ class Clov3r:
             # Clear the response track at the start of the method
             self.response_track.clear()
 
-            async for response in self.send_command_to_parser(data):
-                if response:
-                    print(f"user_commands: {response}")
-                    self.response_track.add(response)
+            # Queue the data to be sent to the parser slowly
+            await self.send_to_parser_slowly(data, delay=0.2)
 
+            # Process the responses after all data has been sent
             for response in self.response_track:
                 if not admin_command:
                     await self.response_queue.put((channel, response))
                 else:
                     await self.send(response)
         except Exception as e:
-            print(e)
+            print(f"Error in user_commands: {e}")
 
     async def send_command_to_parser(self, data):
         responses = []
@@ -464,7 +503,7 @@ class Clov3r:
                 await writer.drain()
 
                 while True:
-                    response = await asyncio.wait_for(reader.read(2048), timeout=5)
+                    response = await asyncio.wait_for(reader.read(2048), timeout=30)
                     if not response:
                         break
                     if response in responses:
@@ -491,6 +530,14 @@ class Clov3r:
                 print(f"Telling {sender}: {response}")
                 await self.response_queue.put((channel, response))
 
+    async def notes_check(self, sender, channel):
+        self.requester = sender
+        for response in self.deltacheck.check_time_deltas(self.requester, channel):
+            if response:
+                self.is_notice = True
+                print(f"User Memo: {response}")
+                await self.response_queue.put((channel, response))
+
     async def keep_alive(self):
         while not self.disconnect_requested:
             async with self.lock:
@@ -505,6 +552,7 @@ class Clov3r:
             await asyncio.sleep(30)
 
     def load_ignore_list(self):
+        self.ignore_list = []
         file_path = 'ignore_list.txt'
         try:
             with open(file_path, 'r') as file:
@@ -523,42 +571,73 @@ class Clov3r:
             self.reader = None
 
     async def main_loop(self):
-        try:
-            while True:
-                try:
-                    await self.connect()
-                    await self.load_last_messages()
-                    self.load_ignore_list()
+        while True:
+            try:
+                await self.connect()
+                await self.load_last_messages()
+                self.load_ignore_list()
 
-                    keep_alive_task = asyncio.create_task(self.keep_alive())
-                    handle_messages_task = asyncio.create_task(self.handle_messages())
-                    clear_response_task = asyncio.create_task(self.clear_response())
-                    response_handler = asyncio.create_task(self.send_responses_worker())
+                keep_alive_task = asyncio.create_task(self.keep_alive())
+                handle_messages_task = asyncio.create_task(self.handle_messages())
+                clear_response_task = asyncio.create_task(self.clear_response())
+                response_handler_task = asyncio.create_task(self.send_responses_worker())
 
-                    done, pending = await asyncio.wait(
-                        [keep_alive_task, handle_messages_task, response_handler],
-                        return_when=asyncio.FIRST_COMPLETED
-                    )
+                done, pending = await asyncio.wait(
+                    [keep_alive_task, handle_messages_task, response_handler_task, clear_response_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
 
-                    for task in pending:
-                        task.cancel()
+                for task in pending:
+                    task.cancel()
 
-                    await asyncio.gather(*pending, return_exceptions=True)
+                await asyncio.gather(*pending, return_exceptions=True)
 
-                except (ConnectionError, OSError) as e:
-                    print(e)
-                finally:
-                    await self.disconnect()
-
-        except KeyboardInterrupt:
-            print("KeyboardInterrupt received. Shutting down...")
-        except Exception as e:
-            print(f"Unknown Exception: {e}")
+            except (ConnectionError, OSError) as e:
+                if isinstance(e, OSError) and ctypes.get_last_error() == 121:
+                    print(f"WinError 121: The semaphore timeout period has expired. Reconnecting...")
+                else:
+                    print(f"Connection error: {e}. Reconnecting...")
+                await self.disconnect()
+                await asyncio.sleep(5)  # Short delay before reconnecting
+            except KeyboardInterrupt:
+                print("KeyboardInterrupt received. Shutting down...")
+                break
+            except Exception as e:
+                print(f"Unknown Exception: {e}")
+                await self.disconnect()
+                break
 
     async def start(self):
         await self.main_loop()
 
+def list_ini_files(directory="."):
+    return [f for f in os.listdir(directory) if f.endswith(".ini")]
+
+def select_ini_file():
+    ini_files = list_ini_files()
+    if not ini_files:
+        print("No .ini files found in the current directory.")
+        return None
+
+    print("Select a configuration file:")
+    for idx, file in enumerate(ini_files, start=1):
+        print(f"{idx}. {file}")
+
+    while True:
+        try:
+            choice = int(input("Enter the number of the configuration file to use: "))
+            if 1 <= choice <= len(ini_files):
+                return ini_files[choice - 1]
+            else:
+                print(f"Invalid selection. Please enter a number between 1 and {len(ini_files)}.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+class NameInUseError(ConnectionError):
+    pass
 
 if __name__ == "__main__":
-    bot = Clov3r.from_config_file("bot_config.ini")
-    asyncio.run(bot.start())
+    selected_file = select_ini_file()
+    if selected_file:
+        bot = Clov3r.from_config_file(selected_file)
+        asyncio.run(bot.start())
