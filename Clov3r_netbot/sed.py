@@ -15,13 +15,13 @@ async def handle_sed_command(channel, sender, content, last_messages):
     except re.error as e:
         response = f"[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
         print(response)
-        return response
+        return
 
     character_limit = 460
     if not match:
         response = f"[\x0304Sed\x03] Not A Valid Sed Command\r\n"
         print(response)
-        return response
+        return
 
     try:
         # Extract groups from the match
@@ -45,12 +45,12 @@ async def handle_sed_command(channel, sender, content, last_messages):
     except re.error as e:
         response = f"[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
         print(response)
-        return response
+        return
 
     if channel not in last_messages:
         response = f"[\x0304Sed\x03] No message history found for the channel\r\n"
         print(response)
-        return response
+        return
 
     corrected_message = None
     original_sender_corrected = None
@@ -103,12 +103,12 @@ async def handle_sed_command(channel, sender, content, last_messages):
         else:
             response = f"[\x0304Sed\x03] No matching message found to correct from {target_nickname}\r\n"
             print(f"Sent: {response} to {channel}")
-            return response
+            return
     except re.error as e:
         response = f"[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
         print(response)
-        return response
+        return
     except ValueError as e:
         response = f"[\x0304Sed\x03] Error in processing sed command: {str(e)}\r\n"
         print(response)
-        return response
+        return
