@@ -167,5 +167,5 @@ class Googlesearch:
         video_url = f"https://www.youtube.com/watch?v={video_id}"
 
         # The bot response
-        response = f"[\x0301,00\x02You\x0300,04\x02Tube\x03]\x0F {title} | {channel_title} | {description}... | {video_url}"
+        response = f"\x030,4 ► \x031,0\x02YouTube\x0F {title} | {channel_title} | {description}... | {video_url}"
         return response
