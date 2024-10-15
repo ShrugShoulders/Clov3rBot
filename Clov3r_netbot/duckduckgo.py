@@ -1,20 +1,11 @@
 from duckduckgo_search import DDGS
 
-def duck_search(query, channel):
-    # List of channels with safesearch off
-    channels_with_safesearch_off = ['##rudechat']
-    
-    # Determine safesearch setting based on the channel
-    if channel in channels_with_safesearch_off:
-        safesearch_setting = 'off'
-    else:
-        safesearch_setting = 'on'
-    
+def duck_search(query):
     try:
         results = DDGS().text(
             keywords=query,
             region='wt-wt',
-            safesearch=safesearch_setting,
+            safesearch='off',
             timelimit='7d',
             max_results=1
         )
