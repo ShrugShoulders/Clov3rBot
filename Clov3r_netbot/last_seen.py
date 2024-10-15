@@ -29,8 +29,19 @@ class Seenme:
         days, seconds = delta.days, delta.seconds
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
-        return f"{days}d {hours}h {minutes}m {seconds}s"
-
+        
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if seconds:
+            parts.append(f"{seconds}s")
+        
+        return ' '.join(parts)
+        
     async def seen_command(self, channel, sender, content):
         try:
             self.last_seen = {}
@@ -104,4 +115,31 @@ class Seenme:
         else:
             response = f"{sender}, please provide a target user for the .stats command"
             return response
-            
+
+    async def top_stats_command(self, channel, sender, content):
+        # Ensure last_seen is loaded
+        self.last_seen = {}
+        self.load_last_seen()
+
+        user_message_counts = []
+
+        # Iterate over users and collect message counts for the given channel
+        for user, channels in self.last_seen.items():
+            if channel in channels:
+                chat_count = channels[channel].get('chat_count', 0)
+                user_message_counts.append((user, chat_count))
+
+        # Sort the users by message count in descending order
+        user_message_counts.sort(key=lambda x: x[1], reverse=True)
+
+        # Get the top 3 users (or fewer if there are less than 3)
+        top_users = user_message_counts[:3]
+
+        # Build the response
+        if top_users:
+            users_str = " - ".join([f"{user}, {count}" for user, count in top_users])
+            response = f"These are the top users in the channel: {users_str}"
+        else:
+            response = f"{sender}, no stats found for {channel}."
+
+        return response
