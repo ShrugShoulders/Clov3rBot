@@ -5,7 +5,7 @@ import asyncio
 class WeatherSnag:
     def __init__(self):
         self.api_key = ""
-        self.user_agent = "Clov3r_forecast, your@email"
+        self.user_agent = "Clov3r_forecast, email@email.com"
 
     async def geocode_location(self, location):
         # If the location is empty, return None
@@ -90,7 +90,7 @@ class WeatherSnag:
                     nxt6hr_message = f"Next 6 hours: {next_6_hours_summary.get('symbol_code', 'N/A')}"
                     
                     # Send weather forecast to the channel
-                    response = f"{forecast_message} " + f"{temp_message} " + f"{cloud_message} " + f"{humidity_message} " + f"{wind_speed} " + f"{wind_direction} " + f"{nxt1hr_message} " + f"{nxt6hr_message} "
+                    response = f"{forecast_message} " + f"{temp_message} " + f"{cloud_message} " + f"{humidity_message} " + f"{wind_speed} " + f"{wind_direction} " + f"{nxt1hr_message} " + f"{nxt6hr_message} (lat: {lat} lon: {lon})"
                     return response
                 
             # If no forecast available
