@@ -25,7 +25,7 @@ def get_bug_details(args):
             occurrence = 1
 
     url = f"https://bugs.gentoo.org/rest/bug/{bug_id}"
-    send_url = f"https://bugs.gentoo.org/{bug_id}"
+    send_url = f"https://bugs.gentoo.org/"
     response = requests.get(url)
     
     if response.status_code == 200:
@@ -35,16 +35,16 @@ def get_bug_details(args):
             if search_term:
                 search_results = search_bug_data(bug, search_term, occurrence)
                 if search_results:
-                    return f"Search result for '{search_term}': {search_results} More details: {send_url}"
+                    return f"Search result for '{search_term}': {search_results} More details: <{send_url}{bug['id']}>"
                 else:
                     return f"No results found for '{search_term}' at occurrence {occurrence}."
             else:
-                bug_details = f"{bug['product']}, {bug['severity']}, {bug['status']}: {bug['summary']} ({send_url})"
+                bug_details = f"{bug['product']}, {bug['severity']}, {bug['status']}: {bug['summary']} <{send_url}{bug['id']}>"
                 if action == "change":
-                    details = f"{bug_id}: Last Change Time - {bug['last_change_time']} ({send_url})"
+                    details = f"{bug_id}: Last Change Time - {bug['last_change_time']} <{send_url}{bug['id']}>"
                     return details
                 elif action == "creation":
-                    details = f"Creator: {bug['creator']} @ {bug['creation_time']} ({send_url})"
+                    details = f"Creator: {bug['creator']} @ {bug['creation_time']} <{send_url}{bug['id']}>"
                     return details
                 else:
                     return bug_details
