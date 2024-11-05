@@ -2,16 +2,18 @@ import re
 import asyncio
 
 async def handle_sed_command(channel, sender, content, last_messages):
-    separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}', '$', ',', "'", '"', '/', '\'', '\"']
+    separator_list = ['/', '_', '-', '~', '.', '|', '@', '+', '!', '`', ';', ':', '>', '<', '=', ')', '(', '*', '&', '^', '%', '#', '?', '[', ']', '{', '}', '$', ',', "'", '"']
     try:
         # Escape all separators in the list
         separators = ''.join(map(re.escape, separator_list))
 
-        # Replace escaped separators with placeholders
-        content = re.sub(r'\\([' + re.escape(''.join(separator_list)) + '])', lambda m: f'\\{m.group(1)}', content)
-
-        # Build the regular expression pattern
-        match = re.match(fr'[sS]([{separators}])(.*?)(\1)(.*?)(?:\1([gi]*))?(\1(\d*))?(?:\1(.*))?$', content)
+        # Regular expression to match the sed command
+        match = re.match(
+            fr'[sS]([{separators}])((?:\\.|[^\1])+?)\1((?:\\.|[^\1])*?)'  # Match 'sed' pattern and new content
+            r'(?:\1([gi]*))?(?:\1(\d*))?(?:\1(.*))?$',                    # Optional flags, repeat count, and additional args
+            content
+        )
+        #match = re.match(fr'[sS]([{separators}])(.*?)(\1)(.*?)(?:\1([gi]*))?(\1(\d*))?(?:\1(.*))?$', content)
     except re.error as e:
         response = f"[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
         print(response)
@@ -25,23 +27,18 @@ async def handle_sed_command(channel, sender, content, last_messages):
 
     try:
         # Extract groups from the match
-        separator, old, _, new, flags, _, occurrence, target_nickname = match.groups()
+        separator, old, new, flags, occurrence, target_nickname = match.groups()
+        new = new if new is not None else ''  # Ensure new is an empty string if not provided
         flags = flags if flags else ''  # Ensure flags are set to an empty string if not provided
 
-        # Check for word boundaries flag
-        word_boundaries = r'\b' if '\\b' in old else ''
+        # Handle special regex replacements for \d and \s
+        old = old.replace(r'\d', r'[0-9]').replace(r'\s', r'\s')
 
-        # If the old string contains \d, replace it with [0-9]
-        old = old.replace(r'\\d', r'[0-9]')
+        # Set up regex flags for case-insensitivity if needed
+        regex_flags = re.IGNORECASE if 'i' in flags else 0
+        count = 0 if 'g' in flags else 1  # Replace globally if 'g' is in flags
 
-        if old == " ":
-            old = r'\s'
-
-        # Update the regular expression with word boundaries
-        regex_pattern = fr'{word_boundaries}{old}{word_boundaries}'
-
-        # Print the separator
-        print(f"Separator: {separator}")
+        print(f"Separator: {separator}, Old: {old}, New: '{new}', Flags: {flags}, Occurrence: {occurrence}")
     except re.error as e:
         response = f"[\x0304Sed\x03] Invalid sed command: {str(e)}\r\n"
         print(response)
@@ -55,7 +52,6 @@ async def handle_sed_command(channel, sender, content, last_messages):
     corrected_message = None
     original_sender_corrected = None
     total_characters = 0
-    regex_flags = re.IGNORECASE if 'i' in flags else 0
 
     try:
         for formatted_message in reversed(last_messages[channel]):
@@ -71,17 +67,17 @@ async def handle_sed_command(channel, sender, content, last_messages):
 
             print(f"Checking message - Original: <{original_sender}> {original_message}")
 
-            if re.search(regex_pattern, original_message, flags=regex_flags):
+            # Search and replace using the specified regex
+            if re.search(old, original_message, flags=regex_flags):
                 if occurrence:
-                    # Function to replace only the specified occurrence
+                    # Replace only the specified occurrence
                     def replace_nth(match):
                         nonlocal occurrence
-                        occurrence = int(occurrence) - 1  # Convert occurrence to integer before subtraction
+                        occurrence = int(occurrence) - 1
                         return new if occurrence == 0 else match.group(0)
 
-                    replaced_message = re.sub(regex_pattern, replace_nth, original_message, flags=regex_flags)
+                    replaced_message = re.sub(old, replace_nth, original_message, flags=regex_flags)
                 else:
-                    count = 0 if 'g' in flags else 1
                     replaced_message = re.sub(old, new.replace('&', r'\g<0>'), original_message, flags=regex_flags, count=count)
 
                 total_characters += len(replaced_message)
